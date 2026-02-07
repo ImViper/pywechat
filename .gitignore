@@ -8,6 +8,7 @@ __pycache__
 logs/
 rush_moments_cache/
 rush_moments_cache_test_*/
+rush_moments_cache_feed_*/
 test_moments_output/
 dataset/
 rush_state.json
@@ -16,6 +17,7 @@ rush_state_*.json
 
 # Local secrets
 config/.local_secrets.json
+config/sns_click_offsets.local.json
 
 # Local debug/benchmark artifacts
 benchmark_results.json

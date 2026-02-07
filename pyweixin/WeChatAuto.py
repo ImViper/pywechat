@@ -56,6 +56,7 @@ import os
 import re
 import time
 import json
+import hashlib
 import pyautogui
 import win32clipboard
 import win32gui,win32con
@@ -100,6 +101,90 @@ Customs=Customs()#所有Custom类型UI
 ListItems=ListItems()#所有ListItems类型UI
 pyautogui.FAILSAFE=False#防止鼠标在屏幕边缘处造成的误触
 Regex_Patterns=Regex_Patterns()#所有的正则pattern
+
+
+# 朋友圈评论流程坐标偏移常量
+_SNS_ELLIPSIS_X_OFFSET=44
+_SNS_ELLIPSIS_Y_OFFSET=15
+_SNS_SEND_LIST_X_OFFSET=70
+_SNS_SEND_LIST_Y_OFFSET=42
+_SNS_SEND_DETAIL_X_OFFSET=70
+_SNS_SEND_DETAIL_Y_OFFSET=42
+_SNS_CLICK_RETRY=2
+_SNS_OFFSET_CONFIG_ENV="PYWEIXIN_SNS_OFFSET_FILE"
+
+
+def _apply_sns_click_offsets(overrides:dict)->None:
+    """Apply optional user overrides for SNS click offsets."""
+    global _SNS_ELLIPSIS_X_OFFSET
+    global _SNS_ELLIPSIS_Y_OFFSET
+    global _SNS_SEND_LIST_X_OFFSET
+    global _SNS_SEND_LIST_Y_OFFSET
+    global _SNS_SEND_DETAIL_X_OFFSET
+    global _SNS_SEND_DETAIL_Y_OFFSET
+    global _SNS_CLICK_RETRY
+    if not isinstance(overrides,dict):
+        return
+    normalized=dict(overrides)
+    ellipsis=overrides.get("ellipsis")
+    if isinstance(ellipsis,dict):
+        normalized["SNS_ELLIPSIS_X_OFFSET"]=ellipsis.get("x_offset",normalized.get("SNS_ELLIPSIS_X_OFFSET"))
+        normalized["SNS_ELLIPSIS_Y_OFFSET"]=ellipsis.get("y_offset",normalized.get("SNS_ELLIPSIS_Y_OFFSET"))
+    send=overrides.get("send")
+    if isinstance(send,dict):
+        send_list=send.get("list")
+        send_detail=send.get("detail")
+        if isinstance(send_list,dict):
+            normalized["SNS_SEND_LIST_X_OFFSET"]=send_list.get("x_offset",normalized.get("SNS_SEND_LIST_X_OFFSET"))
+            normalized["SNS_SEND_LIST_Y_OFFSET"]=send_list.get("y_offset",normalized.get("SNS_SEND_LIST_Y_OFFSET"))
+        if isinstance(send_detail,dict):
+            normalized["SNS_SEND_DETAIL_X_OFFSET"]=send_detail.get("x_offset",normalized.get("SNS_SEND_DETAIL_X_OFFSET"))
+            normalized["SNS_SEND_DETAIL_Y_OFFSET"]=send_detail.get("y_offset",normalized.get("SNS_SEND_DETAIL_Y_OFFSET"))
+    mapping={
+        "SNS_ELLIPSIS_X_OFFSET":"_SNS_ELLIPSIS_X_OFFSET",
+        "SNS_ELLIPSIS_Y_OFFSET":"_SNS_ELLIPSIS_Y_OFFSET",
+        "SNS_SEND_LIST_X_OFFSET":"_SNS_SEND_LIST_X_OFFSET",
+        "SNS_SEND_LIST_Y_OFFSET":"_SNS_SEND_LIST_Y_OFFSET",
+        "SNS_SEND_DETAIL_X_OFFSET":"_SNS_SEND_DETAIL_X_OFFSET",
+        "SNS_SEND_DETAIL_Y_OFFSET":"_SNS_SEND_DETAIL_Y_OFFSET",
+        "SNS_CLICK_RETRY":"_SNS_CLICK_RETRY",
+    }
+    for key,var_name in mapping.items():
+        if key not in normalized:
+            continue
+        try:
+            value=int(normalized.get(key))
+        except Exception:
+            continue
+        if key=="SNS_CLICK_RETRY" and value<1:
+            continue
+        globals()[var_name]=value
+
+
+def _load_sns_click_offsets()->None:
+    """Load optional click offsets from env/local config files."""
+    candidates=[]
+    env_path=os.getenv(_SNS_OFFSET_CONFIG_ENV,"").strip()
+    if env_path:
+        candidates.append(env_path)
+    repo_root=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates.append(os.path.join(repo_root,"config","sns_click_offsets.local.json"))
+    candidates.append(os.path.join(repo_root,"config","sns_click_offsets.json"))
+    for path in candidates:
+        if not path:
+            continue
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path,"r",encoding="utf-8-sig") as f:
+                overrides=json.load(f)
+        except Exception:
+            continue
+        _apply_sns_click_offsets(overrides)
+        break
+
+
+_load_sns_click_offsets()
 
 
 class AutoReply():
@@ -1994,6 +2079,141 @@ class Moments():
         post_button.click_input()
 
     @staticmethod
+    def _is_green_pixel(r:int,g:int,b:int)->bool:
+        """Heuristic for WeChat send button green."""
+        if g < 80:
+            return False
+        if (g - r) < 18 or (g - b) < 8:
+            return False
+        if g < int(r * 1.18):
+            return False
+        if g < int(b * 1.10):
+            return False
+        return True
+
+    @staticmethod
+    def _find_green_button_center(region:tuple[int,int,int,int])->(tuple[int,int]|None):
+        """Find center point of the largest green-ish area in a region."""
+        try:
+            screenshot=pyautogui.screenshot(region=region).convert('RGB')
+        except Exception:
+            return None
+        width,height=screenshot.size
+        if width<=0 or height<=0:
+            return None
+        pixels=screenshot.load()
+        min_x,min_y=width,height
+        max_x,max_y=-1,-1
+        hit_count=0
+        for y in range(0,height,2):
+            for x in range(0,width,2):
+                r,g,b=pixels[x,y]
+                if Moments._is_green_pixel(r,g,b):
+                    hit_count+=1
+                    if x<min_x:
+                        min_x=x
+                    if y<min_y:
+                        min_y=y
+                    if x>max_x:
+                        max_x=x
+                    if y>max_y:
+                        max_y=y
+        if hit_count<18 or max_x<0 or max_y<0:
+            return None
+        if (max_x-min_x)<10 or (max_y-min_y)<6:
+            return None
+        center_x=region[0]+(min_x+max_x)//2
+        center_y=region[1]+(min_y+max_y)//2
+        return center_x,center_y
+
+    @staticmethod
+    def _click_send_button(anchor_rect,x_offset:int=70,y_offset:int=42)->bool:
+        """Click send button using green-pixel detection with coordinate fallback."""
+        fallback_coords=(anchor_rect.right-x_offset,anchor_rect.bottom-y_offset)
+        regions=[
+            (max(fallback_coords[0]-80,0),max(fallback_coords[1]-40,0),160,80),
+            (max(anchor_rect.right-(x_offset+140),0),max(anchor_rect.bottom-(y_offset+80),0),260,150),
+        ]
+        for region in regions:
+            green_center=Moments._find_green_button_center(region)
+            if green_center is not None:
+                mouse.click(coords=green_center)
+                return True
+        mouse.click(coords=fallback_coords)
+        return False
+
+    @staticmethod
+    def _open_comment_editor(moments_window,content_item,use_offset_fix:bool=False,pre_move_coords:tuple=None)->bool:
+        """点击省略号并打开评论输入框。"""
+        comment_button=moments_window.child_window(**Buttons.CommentButton)
+        for _ in range(_SNS_CLICK_RETRY):
+            if pre_move_coords is not None:
+                mouse.move(coords=pre_move_coords)
+            rect=content_item.rectangle()
+            x_offset=_SNS_ELLIPSIS_X_OFFSET
+            if use_offset_fix:
+                win_rect=moments_window.rectangle()
+                x_offset+=(rect.left-win_rect.left)
+            ellipsis_area=(rect.right-x_offset,rect.bottom-_SNS_ELLIPSIS_Y_OFFSET)
+            mouse.click(coords=ellipsis_area)
+            time.sleep(0.15)
+            if comment_button.exists(timeout=0.2):
+                comment_button.click_input()
+                time.sleep(0.15)
+                return True
+            pyautogui.press('esc')
+            time.sleep(0.05)
+        return False
+
+    @staticmethod
+    def _paste_and_send_comment(moments_window,text:str,anchor_mode:str='list',anchor_source=None,clear_first:bool=True)->bool:
+        """粘贴评论文本并发送。"""
+        if clear_first:
+            pyautogui.hotkey('ctrl','a')
+            pyautogui.press('backspace')
+        SystemSettings.copy_text_to_windowsclipboard(text=text)
+        pyautogui.hotkey('ctrl','v')
+        time.sleep(0.05)
+        if anchor_source is not None:
+            cr=anchor_source.rectangle()
+            if anchor_mode=='list':
+                Moments._click_send_button(cr,x_offset=_SNS_SEND_LIST_X_OFFSET,y_offset=_SNS_SEND_LIST_Y_OFFSET)
+            else:
+                Moments._click_send_button(cr,x_offset=_SNS_SEND_DETAIL_X_OFFSET,y_offset=_SNS_SEND_DETAIL_Y_OFFSET)
+            return True
+        pyautogui.press('enter')
+        return True
+
+    @staticmethod
+    def _comment_flow(moments_window,content_item,comments,anchor_mode:str='list',
+                      anchor_source=None,use_offset_fix:bool=False,
+                      pre_move_coords:tuple=None,clear_first:bool=True,
+                      callback:Callable[[str],str]=None):
+        """统一评论流程：打开输入框 -> 粘贴 -> 发送。"""
+        if isinstance(comments,str):
+            comments=[comments]
+        for idx,text in enumerate(comments):
+            text=str(text).strip()
+            if not text:
+                continue
+            if callback is not None:
+                text=callback(text)
+            opened=Moments._open_comment_editor(
+                moments_window,content_item,
+                use_offset_fix=use_offset_fix,
+                pre_move_coords=pre_move_coords)
+            if not opened:
+                print(f"[评论] 第{idx+1}条打开编辑框失败，跳过")
+                continue
+            Moments._paste_and_send_comment(
+                moments_window,text,
+                anchor_mode=anchor_mode,
+                anchor_source=anchor_source,
+                clear_first=clear_first)
+            if idx<len(comments)-1:
+                time.sleep(0.5)
+
+    @staticmethod
     def dump_recent_moments(recent:Literal['Today','Yesterday','Week','Month']='Today',number:int=None,is_maximize:bool=None,close_weixin:bool=None)->list[dict]:
         '''
         该方法用来获取最近一月内微信朋友圈内好友发布过的具体内容
@@ -2116,7 +2336,10 @@ class Moments():
         def like(content_listitem:ListItemWrapper):
             #点赞操作
             mouse.move(coords=center_point)
-            ellipsis_area=(content_listitem.rectangle().right-44,content_listitem.rectangle().bottom-15)#省略号按钮所处位置
+            ellipsis_area=(
+                content_listitem.rectangle().right-_SNS_ELLIPSIS_X_OFFSET,
+                content_listitem.rectangle().bottom-_SNS_ELLIPSIS_Y_OFFSET
+            )#省略号按钮所处位置
             mouse.click(coords=ellipsis_area)
             if like_button.exists(timeout=0.1):
                 like_button.click_input()
@@ -2124,7 +2347,10 @@ class Moments():
         def comment(content_listitem:ListItemWrapper,comment_listitem:ListItemWrapper,content:str):
             #评论操作
             mouse.move(coords=center_point)
-            ellipsis_area=(content_listitem.rectangle().right-44,content_listitem.rectangle().bottom-15)#省略号按钮所处位置
+            ellipsis_area=(
+                content_listitem.rectangle().right-_SNS_ELLIPSIS_X_OFFSET,
+                content_listitem.rectangle().bottom-_SNS_ELLIPSIS_Y_OFFSET
+            )#省略号按钮所处位置
             mouse.click(coords=ellipsis_area)
             reply=callback(content) 
             if comment_button.exists(timeout=0.1) and reply:
@@ -2133,9 +2359,15 @@ class Moments():
                 pyautogui.press('backspace')
                 SystemSettings.copy_text_to_windowsclipboard(text=reply)
                 pyautogui.hotkey('ctrl','v')
-                rectangle=comment_listitem.rectangle()
-                send_button_area=(rectangle.right-70,rectangle.bottom-42)
-                mouse.click(coords=send_button_area)
+                if comment_listitem is not None:
+                    rectangle=comment_listitem.rectangle()
+                    Moments._click_send_button(
+                        rectangle,
+                        x_offset=_SNS_SEND_LIST_X_OFFSET,
+                        y_offset=_SNS_SEND_LIST_Y_OFFSET
+                    )
+                else:
+                    pyautogui.press('enter')
 
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
@@ -2327,7 +2559,10 @@ class Moments():
             #点赞操作
             center_point=(listview.rectangle().mid_point().x,listview.rectangle().mid_point().y)
             mouse.move(coords=center_point)
-            ellipsis_area=(content_listitem.rectangle().right-44,content_listitem.rectangle().bottom-15)#省略号按钮所处位置
+            ellipsis_area=(
+                content_listitem.rectangle().right-_SNS_ELLIPSIS_X_OFFSET,
+                content_listitem.rectangle().bottom-_SNS_ELLIPSIS_Y_OFFSET
+            )#省略号按钮所处位置
             mouse.click(coords=ellipsis_area)
             if like_button.exists(timeout=0.1):
                 like_button.click_input()
@@ -2337,18 +2572,27 @@ class Moments():
             comment_listitem=Tools.get_next_item(listview,content_listitem)
             center_point=(listview.rectangle().mid_point().x,listview.rectangle().mid_point().y)
             mouse.move(coords=center_point)
-            ellipsis_area=(content_listitem.rectangle().right-44,content_listitem.rectangle().bottom-15)#省略号按钮所处位置
+            ellipsis_area=(
+                content_listitem.rectangle().right-_SNS_ELLIPSIS_X_OFFSET,
+                content_listitem.rectangle().bottom-_SNS_ELLIPSIS_Y_OFFSET
+            )#省略号按钮所处位置
             mouse.click(coords=ellipsis_area)
             reply=callback(content) 
-            if comment_button.exists(timeout=0.1):
+            if comment_button.exists(timeout=0.1) and reply:
                 comment_button.click_input()
                 pyautogui.hotkey('ctrl','a')
                 pyautogui.press('backspace')
                 SystemSettings.copy_text_to_windowsclipboard(text=reply)
                 pyautogui.hotkey('ctrl','v')
-                rectangle=comment_listitem.rectangle()
-                send_button_area=(rectangle.right-70,rectangle.bottom-42)
-                mouse.click(coords=send_button_area)
+                if comment_listitem is not None:
+                    rectangle=comment_listitem.rectangle()
+                    Moments._click_send_button(
+                        rectangle,
+                        x_offset=_SNS_SEND_LIST_X_OFFSET,
+                        y_offset=_SNS_SEND_LIST_Y_OFFSET
+                    )
+                else:
+                    pyautogui.press('enter')
 
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
@@ -2390,6 +2634,442 @@ class Moments():
                     break
         moments_window.close()
         return posts
+
+    @staticmethod
+    def fetch_and_comment_friend_moment(
+        friend:str,
+        ai_callback,
+        target_folder:str=None,
+        is_maximize:bool=None,
+        close_weixin:bool=None,
+        include_keywords:list=None,
+        exclude_keywords:list=None,
+        last_fingerprint:str=None
+    )->dict:
+        """Open one friend's moments once, read + infer + comment."""
+        def resolve_child_window(moments_window,criteria:dict,error_hint:str,retries:int=4,wait:float=0.12):
+            last_error=None
+            for _ in range(retries):
+                try:
+                    ctrl=moments_window.child_window(**criteria)
+                    if ctrl.exists(timeout=0.2):
+                        return ctrl
+                except Exception as e:
+                    last_error=e
+                time.sleep(wait)
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError(error_hint)
+
+        if is_maximize is None:
+            is_maximize=GlobalConfig.is_maximize
+        if close_weixin is None:
+            close_weixin=GlobalConfig.close_weixin
+        if target_folder is None:
+            target_folder=os.path.join(os.getcwd(),'rush_moments_cache')
+        os.makedirs(target_folder,exist_ok=True)
+
+        result={
+            'success':False,
+            'content':'',
+            'image_count':0,
+            'publish_time':'',
+            'fingerprint':'',
+            'ai_answer':None,
+            'comment_posted':False,
+            'error':None,
+            'image_paths':[],
+            'screenshot_path':'',
+            'detail_folder':''
+        }
+
+        moments_window=None
+        try:
+            moments_window=Navigator.open_friend_moments(friend=friend,is_maximize=False,close_weixin=False)
+            if is_maximize:
+                try:
+                    win32gui.SendMessage(moments_window.handle,win32con.WM_SYSCOMMAND,win32con.SC_MAXIMIZE,0)
+                except Exception:
+                    pass
+
+            moments_list=resolve_child_window(moments_window,Lists.MomentsList,'cannot locate moments list')
+            moments_list.type_keys('{PGDN}')
+            moments_list.type_keys('{PGUP}')
+            not_contents=['mmui::AlbumBaseCell','mmui::AlbumTopCell']
+            selected_item=None
+            for _ in range(6):
+                moments_list.type_keys('{DOWN}',pause=0.05)
+                selected=[li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
+                if selected and selected[0].class_name() not in not_contents:
+                    selected_item=selected[0]
+                    selected_item.click_input()
+                    break
+            if selected_item is None:
+                result['error']='cannot locate first friend moment'
+                return result
+
+            sns_detail_list=resolve_child_window(moments_window,Lists.SnsDetailList,'cannot locate friend moment detail list')
+            detail_items=sns_detail_list.children(control_type='ListItem')
+            if not detail_items:
+                result['error']='cannot read moment detail list'
+                return result
+            detail_item=detail_items[0]
+            content=detail_item.window_text().strip()
+
+            image_count=0
+            publish_time=''
+            m=re.search(r'包含(\d+)张图片',content)
+            if m:
+                image_count=int(m.group(1))
+            for part in content.split():
+                if ('分钟' in part) or ('小时' in part) or ('昨天' in part) or (':' in part):
+                    publish_time=part
+                    break
+
+            result['content']=content
+            result['image_count']=image_count
+            result['publish_time']=publish_time
+
+            hasher=hashlib.sha1()
+            hasher.update(content.encode('utf-8',errors='ignore'))
+            hasher.update(publish_time.encode('utf-8',errors='ignore'))
+            hasher.update(str(image_count).encode('utf-8'))
+            result['fingerprint']=hasher.hexdigest()
+
+            if last_fingerprint and result['fingerprint']==last_fingerprint:
+                result['success']=True
+                return result
+
+            if include_keywords and not any(kw in content for kw in include_keywords):
+                result['success']=True
+                return result
+            if exclude_keywords and any(kw in content for kw in exclude_keywords):
+                result['success']=True
+                return result
+
+            run_folder=os.path.join(target_folder,f'{friend}_{int(time.time()*1000)}')
+            os.makedirs(run_folder,exist_ok=True)
+            result['detail_folder']=run_folder
+
+            if image_count>0:
+                try:
+                    sns_detail_list_rect=sns_detail_list.rectangle()
+                    comment_items=sns_detail_list.children(control_type='ListItem')
+                    if len(comment_items)>1:
+                        ci_rect=comment_items[1].rectangle()
+                        mouse.click(coords=(ci_rect.left+120,ci_rect.top-80))
+                    else:
+                        mouse.click(coords=(sns_detail_list_rect.mid_point().x,sns_detail_list_rect.mid_point().y))
+                    time.sleep(0.3)
+                    pyautogui.press('left',presses=image_count,interval=0.15)
+                    time.sleep(0.1)
+                    right_click_pos=(sns_detail_list_rect.mid_point().x+20,sns_detail_list_rect.mid_point().y+25)
+                    for i in range(image_count):
+                        try:
+                            sns_detail_list.right_click_input(coords=right_click_pos)
+                            copy_menu=moments_window.child_window(**MenuItems.CopyMenuItem)
+                            if copy_menu.exists(timeout=0.3):
+                                copy_menu.click_input()
+                                time.sleep(0.5)
+                                img_path=os.path.join(run_folder,f'{i}.png')
+                                SystemSettings.save_pasted_image(img_path)
+                                if os.path.isfile(img_path):
+                                    result['image_paths'].append(img_path)
+                        finally:
+                            pyautogui.press('right',interval=0.05)
+                    pyautogui.press('esc')
+                    time.sleep(0.1)
+                except Exception:
+                    try:
+                        pyautogui.press('esc')
+                    except Exception:
+                        pass
+
+            if not result['image_paths']:
+                try:
+                    screenshot_path=os.path.join(run_folder,'content_screenshot.png')
+                    detail_item.capture_as_image().save(screenshot_path)
+                    result['screenshot_path']=screenshot_path
+                    result['image_paths']=[screenshot_path]
+                except Exception:
+                    pass
+
+            result['success']=True
+            ai_answer=ai_callback(content,result['image_paths'])
+            result['ai_answer']=ai_answer
+            if isinstance(ai_answer,list):
+                answer_list=[a.strip() for a in ai_answer if isinstance(a,str) and a.strip()]
+            elif isinstance(ai_answer,str) and ai_answer.strip():
+                answer_list=[ai_answer.strip()]
+            else:
+                answer_list=[]
+            if not answer_list:
+                return result
+
+            comment_cell=None
+            for _item in sns_detail_list.children(control_type='ListItem'):
+                if 'Comment' in _item.class_name():
+                    comment_cell=_item
+                    break
+            if comment_cell is None and len(detail_items)>1:
+                comment_cell=detail_items[-1]
+
+            Moments._comment_flow(
+                moments_window,detail_item,answer_list,
+                anchor_mode='detail',anchor_source=comment_cell,
+                use_offset_fix=True,clear_first=False
+            )
+            result['comment_posted']=True
+            return result
+
+        except Exception as e:
+            result['error']=str(e)
+            import traceback
+            traceback.print_exc()
+            return result
+        finally:
+            if moments_window is not None and close_weixin:
+                try:
+                    moments_window.close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def fetch_and_comment_from_moments_feed(
+        target_author:str,
+        ai_callback,
+        target_folder:str=None,
+        is_maximize:bool=None,
+        close_weixin:bool=None,
+        include_keywords:list=None,
+        exclude_keywords:list=None,
+        last_fingerprint:str=None,
+        refresh_first:bool=True,
+        moments_window:WindowSpecification=None
+    )->dict:
+        """Read first valid post in global feed, infer and comment in list mode."""
+        def resolve_child_window(moments_window,criteria:dict,error_hint:str,retries:int=4,wait:float=0.12):
+            last_error=None
+            for _ in range(retries):
+                try:
+                    ctrl=moments_window.child_window(**criteria)
+                    if ctrl.exists(timeout=0.2):
+                        return ctrl
+                except Exception as e:
+                    last_error=e
+                time.sleep(wait)
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError(error_hint)
+
+        if is_maximize is None:
+            is_maximize=GlobalConfig.is_maximize
+        if close_weixin is None:
+            close_weixin=GlobalConfig.close_weixin
+        if target_folder is None:
+            target_folder=os.path.join(os.getcwd(),'rush_moments_cache_feed')
+        os.makedirs(target_folder,exist_ok=True)
+
+        result={
+            'success':False,
+            'author':'',
+            'content':'',
+            'image_count':0,
+            'publish_time':'',
+            'fingerprint':'',
+            'ai_answer':None,
+            'comment_posted':False,
+            'error':None,
+            'image_paths':[],
+            'screenshot_path':'',
+            'detail_folder':''
+        }
+
+        created_window=False
+
+        def parse_feed_listitem(listitem:ListItemWrapper):
+            sns_timestamp_pattern=Regex_Patterns.Sns_Timestamp_pattern
+            text=listitem.window_text().strip().replace('\n',' ')
+            text=re.sub(r'\s+',' ',text)
+            post_time=''
+            image_count=0
+            possible_timestamps=[part for part in text.split(' ') if sns_timestamp_pattern.match(part)]
+            if possible_timestamps:
+                post_time=possible_timestamps[-1]
+                match=re.search(rf'\s包含(\d+)张图片\s{post_time}',text)
+                if match:
+                    image_count=int(match.group(1))
+                content=re.sub(rf'\s(包含\d+张图片\s{post_time}|视频\s{post_time}|{post_time})','',text).strip()
+            else:
+                content=text
+            author=''
+            body=content
+            if content:
+                parts=content.split(' ',1)
+                author=parts[0].strip()
+                body=parts[1].strip() if len(parts)>1 else ''
+            return author,body,content,image_count,post_time
+
+        try:
+            if moments_window is None:
+                moments_window=Navigator.open_moments(is_maximize=False,close_weixin=False)
+                created_window=True
+
+            if is_maximize:
+                try:
+                    win32gui.SendMessage(moments_window.handle,win32con.WM_SYSCOMMAND,win32con.SC_MAXIMIZE,0)
+                except Exception:
+                    pass
+
+            try:
+                back_button=moments_window.child_window(**Buttons.BackButton)
+                if back_button.exists(timeout=0.1):
+                    back_button.click_input()
+                    time.sleep(0.1)
+            except Exception:
+                pass
+
+            if refresh_first:
+                refresh_button=moments_window.child_window(**Buttons.RefreshButton)
+                if refresh_button.exists(timeout=0.2):
+                    refresh_button.click_input()
+                    time.sleep(0.15)
+
+            moments_list=resolve_child_window(moments_window,Lists.MomentsList,'cannot locate moments feed list')
+            moments_list.type_keys('{HOME}')
+            not_contents=['mmui::TimelineCommentCell','mmui::TimelineCell','mmui::TimelineAdGridImageCell']
+            selected_item=None
+            for _ in range(15):
+                moments_list.type_keys('{DOWN}',pause=0.05)
+                selected=[li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
+                if selected and selected[0].class_name() not in not_contents:
+                    selected_item=selected[0]
+                    break
+            if selected_item is None:
+                result['error']='cannot locate first valid feed item'
+                return result
+
+            author,body,content,image_count,publish_time=parse_feed_listitem(selected_item)
+            result['author']=author
+            result['content']=content
+            result['image_count']=image_count
+            result['publish_time']=publish_time
+
+            hasher=hashlib.sha1()
+            hasher.update(content.encode('utf-8',errors='ignore'))
+            hasher.update(publish_time.encode('utf-8',errors='ignore'))
+            hasher.update(str(image_count).encode('utf-8'))
+            result['fingerprint']=hasher.hexdigest()
+
+            if target_author:
+                author_hit=(author==target_author) or (target_author in author)
+                if not author_hit:
+                    result['success']=True
+                    return result
+
+            if last_fingerprint and result['fingerprint']==last_fingerprint:
+                result['success']=True
+                return result
+
+            text_for_filter=body if body else content
+            if include_keywords and not any(kw in text_for_filter for kw in include_keywords):
+                result['success']=True
+                return result
+            if exclude_keywords and any(kw in text_for_filter for kw in exclude_keywords):
+                result['success']=True
+                return result
+
+            prefix=target_author.strip() if target_author else 'feed'
+            run_folder=os.path.join(target_folder,f'{prefix}_{int(time.time()*1000)}')
+            os.makedirs(run_folder,exist_ok=True)
+            result['detail_folder']=run_folder
+
+            if image_count>0:
+                try:
+                    rect=selected_item.rectangle()
+                    win_rect=moments_window.rectangle()
+                    viewer_right_click_pos=(win_rect.mid_point().x,win_rect.mid_point().y)
+                    open_candidates=[
+                        (rect.left+120,rect.bottom-90),
+                        (rect.left+220,rect.bottom-120),
+                        (rect.mid_point().x,rect.bottom-100),
+                    ]
+                    opened=False
+                    for open_pos in open_candidates:
+                        try:
+                            mouse.click(coords=open_pos)
+                            time.sleep(0.2)
+                            mouse.right_click(coords=viewer_right_click_pos)
+                            copy_menu=moments_window.child_window(**MenuItems.CopyMenuItem)
+                            if copy_menu.exists(timeout=0.3):
+                                copy_menu.click_input()
+                                time.sleep(0.5)
+                                first_img_path=os.path.join(run_folder,'0.png')
+                                SystemSettings.save_pasted_image(first_img_path)
+                                if os.path.isfile(first_img_path):
+                                    result['image_paths'].append(first_img_path)
+                                    opened=True
+                                    for i in range(1,image_count):
+                                        pyautogui.press('right',interval=0.08)
+                                        time.sleep(0.1)
+                                        mouse.right_click(coords=viewer_right_click_pos)
+                                        copy_menu=moments_window.child_window(**MenuItems.CopyMenuItem)
+                                        if copy_menu.exists(timeout=0.3):
+                                            copy_menu.click_input()
+                                            time.sleep(0.4)
+                                            img_path=os.path.join(run_folder,f'{i}.png')
+                                            SystemSettings.save_pasted_image(img_path)
+                                            if os.path.isfile(img_path):
+                                                result['image_paths'].append(img_path)
+                                    break
+                        finally:
+                            pyautogui.press('esc')
+                            time.sleep(0.1)
+                    if (not opened) and image_count>0:
+                        result['error']='list mode cannot extract images, skipped'
+                        result['success']=True
+                        return result
+                except Exception as e:
+                    result['error']=f'list image extraction failed: {e}'
+                    result['success']=True
+                    return result
+
+            result['success']=True
+            ai_answer=ai_callback(content,result['image_paths'])
+            result['ai_answer']=ai_answer
+            if isinstance(ai_answer,list):
+                answer_list=[a.strip() for a in ai_answer if isinstance(a,str) and a.strip()]
+            elif isinstance(ai_answer,str) and ai_answer.strip():
+                answer_list=[ai_answer.strip()]
+            else:
+                answer_list=[]
+            if not answer_list:
+                return result
+
+            comment_listitem=Tools.get_next_item(moments_list,selected_item)
+            if comment_listitem is None:
+                result['error']='cannot locate comment anchor in feed list'
+                return result
+
+            Moments._comment_flow(
+                moments_window,selected_item,answer_list,
+                anchor_mode='list',anchor_source=comment_listitem,
+                use_offset_fix=False,clear_first=False
+            )
+            result['comment_posted']=True
+            return result
+
+        except Exception as e:
+            result['error']=str(e)
+            import traceback
+            traceback.print_exc()
+            return result
+        finally:
+            if created_window and moments_window is not None and close_weixin:
+                try:
+                    moments_window.close()
+                except Exception:
+                    pass
 
 
 

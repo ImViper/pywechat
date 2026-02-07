@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import mimetypes
 import os
@@ -72,21 +73,60 @@ class PaddleOCRProvider:
     lang: str = "ch"  # 'ch' for Chinese, 'en' for English
     show_log: bool = False
 
+    @staticmethod
+    def _looks_like_missing_paddle_core(exc: Exception) -> bool:
+        """Detect missing paddle runtime from nested exceptions/messages."""
+        text = f"{type(exc).__name__}: {exc}"
+        lower_text = text.lower()
+        if "no module named 'paddle'" in lower_text:
+            return True
+        if "import paddle" in lower_text and "no module named" in lower_text:
+            return True
+        cause = getattr(exc, "__cause__", None)
+        if cause is not None and cause is not exc:
+            cause_text = f"{type(cause).__name__}: {cause}".lower()
+            if "no module named 'paddle'" in cause_text:
+                return True
+        return False
+
     def _get_ocr(self):
         """Lazy load PaddleOCR instance."""
         if self._ocr_instance is None:
             try:
                 from paddleocr import PaddleOCR
-                self._ocr_instance = PaddleOCR(
-                    use_angle_cls=self.use_angle_cls,
-                    lang=self.lang,
-                    show_log=self.show_log,
-                    use_gpu=False  # Set to True if you have GPU
-                )
+                sig = inspect.signature(PaddleOCR)
+                kwargs = {}
+                if "lang" in sig.parameters:
+                    kwargs["lang"] = self.lang
+                if "show_log" in sig.parameters:
+                    kwargs["show_log"] = self.show_log
+                if "device" in sig.parameters:
+                    kwargs["device"] = "cpu"
+                if "use_textline_orientation" in sig.parameters:
+                    kwargs["use_textline_orientation"] = self.use_angle_cls
+                elif "use_angle_cls" in sig.parameters:
+                    kwargs["use_angle_cls"] = self.use_angle_cls
+                if "use_gpu" in sig.parameters:
+                    kwargs["use_gpu"] = False
+                self._ocr_instance = PaddleOCR(**kwargs)
             except ImportError as exc:
+                if "no module named 'paddle'" in str(exc).lower():
+                    raise RuntimeError(
+                        "PaddleOCR runtime dependency 'paddle' is missing. "
+                        "Install paddlepaddle in a supported Python environment "
+                        "(recommended Python 3.10/3.11)."
+                    ) from exc
                 raise RuntimeError(
                     "PaddleOCR not installed. Run: pip install paddleocr paddlepaddle"
                 ) from exc
+            except Exception as exc:
+                if self._looks_like_missing_paddle_core(exc):
+                    raise RuntimeError(
+                        "PaddleOCR runtime dependency 'paddle' is missing. "
+                        "Install paddlepaddle in a supported Python environment "
+                        "(recommended Python 3.10/3.11)."
+                    ) from exc
+                raise
         return self._ocr_instance
 
     def extract_text(self, image_path: str) -> str:
@@ -97,18 +137,24 @@ class PaddleOCRProvider:
         try:
             ocr = self._get_ocr()
             result = ocr.ocr(image_path, cls=self.use_angle_cls)
-
-            if not result or not result[0]:
+            if not result:
                 return ""
 
-            # Extract text from OCR result
-            # PaddleOCR returns: [[[x1,y1],[x2,y2],[x3,y3],[x4,y4]], (text, confidence)]
+            # Extract text from OCR result (compatible with multiple PaddleOCR result formats).
             lines = []
-            for line in result[0]:
-                if line and len(line) >= 2:
-                    text = line[1][0] if isinstance(line[1], (tuple, list)) else str(line[1])
-                    if text:
-                        lines.append(text.strip())
+            if isinstance(result, list) and result and isinstance(result[0], list):
+                for line in result[0]:
+                    if line and len(line) >= 2:
+                        text_obj = line[1]
+                        text = text_obj[0] if isinstance(text_obj, (tuple, list)) else str(text_obj)
+                        if text:
+                            lines.append(text.strip())
+            elif isinstance(result, list):
+                for item in result:
+                    if isinstance(item, dict):
+                        text = item.get("rec_text") or item.get("text") or ""
+                        if isinstance(text, str) and text.strip():
+                            lines.append(text.strip())
 
             return "\n".join(lines).strip()
         except Exception:
