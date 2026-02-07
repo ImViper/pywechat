@@ -56,6 +56,7 @@ import os
 import re
 import time
 import json
+import hashlib
 import pyautogui
 import win32clipboard
 import win32gui,win32con
@@ -100,6 +101,15 @@ Customs=Customs()#所有Custom类型UI
 ListItems=ListItems()#所有ListItems类型UI
 pyautogui.FAILSAFE=False#防止鼠标在屏幕边缘处造成的误触
 Regex_Patterns=Regex_Patterns()#所有的正则pattern
+
+# 朋友圈评论流程坐标偏移常量
+_SNS_ELLIPSIS_X_OFFSET = 40
+_SNS_ELLIPSIS_Y_OFFSET = 15
+_SNS_SEND_LIST_X_OFFSET = 70   # like_posts 列表页场景
+_SNS_SEND_LIST_Y_OFFSET = 50
+_SNS_SEND_DETAIL_X_OFFSET = 60  # 详情页 DetailCommentCell 场景
+_SNS_SEND_DETAIL_Y_OFFSET = 82
+_SNS_CLICK_RETRY = 2
 
 
 class AutoReply():
@@ -1958,6 +1968,103 @@ class Moments():
         post_button.click_input()
 
     @staticmethod
+    def _open_comment_editor(moments_window,content_item,use_offset_fix:bool=False,pre_move_coords:tuple=None):
+        '''点省略号 → 点评论按钮，打开评论编辑框
+        Args:
+            moments_window: 朋友圈窗口
+            content_item: 当前朋友圈条目 ListItem
+            use_offset_fix: 详情页场景需要额外 x 偏移修正
+            pre_move_coords: 点击前先移动鼠标到指定坐标（like_friend_posts 场景需要）
+        '''
+        comment_button=moments_window.child_window(**Buttons.CommentButton)
+        for attempt in range(_SNS_CLICK_RETRY):
+            if pre_move_coords is not None:
+                mouse.move(coords=pre_move_coords)
+            rect=content_item.rectangle()
+            x_offset=_SNS_ELLIPSIS_X_OFFSET
+            if use_offset_fix:
+                win_rect=moments_window.rectangle()
+                x_offset+=(rect.left-win_rect.left)
+            ellipsis_area=(rect.right-x_offset,rect.bottom-_SNS_ELLIPSIS_Y_OFFSET)
+            mouse.click(coords=ellipsis_area)
+            time.sleep(0.15)
+            if comment_button.exists(timeout=0.2):
+                comment_button.click_input()
+                time.sleep(0.15)
+                return True
+        return False
+
+    @staticmethod
+    def _paste_and_send_comment(moments_window,text:str,anchor_mode:str='list',anchor_source=None,clear_first:bool=True):
+        '''粘贴文本并发送评论
+        Args:
+            moments_window: 朋友圈窗口
+            text: 要发送的评论文本
+            anchor_mode: 发送按钮定位模式, 'list' 或 'detail'
+            anchor_source: 发送按钮的锚点元素(ListItem)；
+                           list 模式下为下一个 ListItem，detail 模式下为 CommentCell
+            clear_first: 是否先清空编辑框
+        '''
+        if clear_first:
+            pyautogui.hotkey('ctrl','a')
+            pyautogui.press('backspace')
+        SystemSettings.copy_text_to_windowsclipboard(text=text)
+        pyautogui.hotkey('ctrl','v')
+        time.sleep(0.05)
+        # 坐标点击优先
+        if anchor_source is not None:
+            cr=anchor_source.rectangle()
+            if anchor_mode=='list':
+                send_coords=(cr.right-_SNS_SEND_LIST_X_OFFSET,cr.bottom-_SNS_SEND_LIST_Y_OFFSET)
+            else:
+                send_coords=(cr.right-_SNS_SEND_DETAIL_X_OFFSET,cr.top+_SNS_SEND_DETAIL_Y_OFFSET)
+            mouse.click(coords=send_coords)
+            return True
+        # 无锚点时回退 Enter
+        pyautogui.press('enter')
+        return True
+
+    @staticmethod
+    def _comment_flow(moments_window,content_item,comments,anchor_mode:str='list',
+                      anchor_source=None,use_offset_fix:bool=False,
+                      pre_move_coords:tuple=None,clear_first:bool=True,
+                      callback:Callable[[str],str]=None):
+        '''组合"打开编辑框 → 粘贴 → 发送"完整评论流程
+        Args:
+            moments_window: 朋友圈窗口
+            content_item: 当前朋友圈条目 ListItem
+            comments: 单条字符串或字符串列表
+            anchor_mode: 'list' 或 'detail'
+            anchor_source: 发送按钮锚点元素
+            use_offset_fix: 详情页 x 偏移修正
+            pre_move_coords: 省略号点击前鼠标预移动坐标
+            clear_first: 是否先清空编辑框
+            callback: 文本处理回调(如 AI 回复)，对每条 comment 调用
+        '''
+        if isinstance(comments,str):
+            comments=[comments]
+        for idx,text in enumerate(comments):
+            text=str(text).strip()
+            if not text:
+                continue
+            if callback is not None:
+                text=callback(text)
+            opened=Moments._open_comment_editor(
+                moments_window,content_item,
+                use_offset_fix=use_offset_fix,
+                pre_move_coords=pre_move_coords)
+            if not opened:
+                print(f"[评论] 第{idx+1}条打开编辑框失败，跳过")
+                continue
+            Moments._paste_and_send_comment(
+                moments_window,text,
+                anchor_mode=anchor_mode,
+                anchor_source=anchor_source,
+                clear_first=clear_first)
+            if idx<len(comments)-1:
+                time.sleep(0.5)
+
+    @staticmethod
     def dump_recent_moments(recent:Literal['Today','Yesterday','Week','Month']='Today',number:int=None,is_maximize:bool=None,close_weixin:bool=None)->list[dict]:
         '''
         该方法用来获取最近一月内微信朋友圈内好友发布过的具体内容
@@ -2090,17 +2197,10 @@ class Moments():
             #评论操作
             comment_listitem=Tools.get_next_item(moments_list,selected_listitem)
             if comment_listitem is not None:
-                ellipsis_area=(selected_listitem.rectangle().right-40,selected_listitem.rectangle().bottom-15)#省略号按钮所处位置
-                mouse.click(coords=ellipsis_area)
-                reply=callback(content) 
-                comment_button.click_input()
-                pyautogui.hotkey('ctrl','a')
-                pyautogui.press('backspace')
-                SystemSettings.copy_text_to_windowsclipboard(text=reply)
-                pyautogui.hotkey('ctrl','v')
-                rectangle=comment_listitem.rectangle()
-                send_button_area=(rectangle.right-70,rectangle.bottom-50)
-                mouse.click(coords=send_button_area)
+                Moments._comment_flow(
+                    moments_window,selected_listitem,content,
+                    anchor_mode='list',anchor_source=comment_listitem,
+                    callback=callback)
 
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
@@ -2156,7 +2256,7 @@ class Moments():
         return posts
 
     @staticmethod
-    def dump_friend_moments(friend:str,number:int,save_detail:bool=False,target_folder:str=None,is_maximize:bool=None,close_weixin:bool=None)->list[dict]:
+    def dump_friend_moments(friend:str,number:int,save_detail:bool=False,target_folder:str=None,is_maximize:bool=None,close_weixin:bool=None,detail_content_filter:Callable[[str],bool]|None=None)->list[dict]:
         '''
         该方法用来获取某个好友的微信朋友圈的内一定数量的内容
         Args:
@@ -2166,6 +2266,7 @@ class Moments():
             target_folder:save_detail所需的文件夹路径
             is_maximize:微信界面是否全屏，默认不全屏
             close_weixin:任务结束后是否关闭微信，默认关闭
+            detail_content_filter:详情保存过滤函数，传入朋友圈文本，返回True时才保存详情
         Returns:
             posts:朋友圈具体内容,list[dict]的格式,具体为[{'内容':xx,'图片数量':xx,'视频数量':xx,'发布时间':xx}]
         '''
@@ -2187,12 +2288,16 @@ class Moments():
                 mouse.click(coords=(x,y))
                 pyautogui.press('left',presses=photo_num,interval=0.15)
                 for i in range(photo_num):
-                    sns_detail_list.right_click_input(coords=right_click_position)
-                    moments_window.child_window(**MenuItems.CopyMenuItem).click_input()
-                    path=os.path.join(detail_folder,f'{i}.png')
-                    time.sleep(0.5)#0.5s缓存到剪贴板时间
-                    SystemSettings.save_pasted_image(path)
-                    pyautogui.press('right',interval=0.05)
+                    try:
+                        sns_detail_list.right_click_input(coords=right_click_position)
+                        moments_window.child_window(**MenuItems.CopyMenuItem).click_input()
+                        path=os.path.join(detail_folder,f'{i}.png')
+                        time.sleep(0.5)#0.5s缓存到剪贴板时间
+                        SystemSettings.save_pasted_image(path)
+                    except Exception as exc:
+                        warn(f'保存朋友圈图片失败，已跳过(index={i}): {exc}')
+                    finally:
+                        pyautogui.press('right',interval=0.05)
                 pyautogui.press('esc')
            
         def is_at_bottom(listview:ListViewWrapper,listitem:ListItemWrapper):
@@ -2216,6 +2321,14 @@ class Moments():
             content=re.sub(rf'\s((包含\d+张图片\s|视频\s).*{post_time})\s','',text)
             return content,photo_num,video_num,post_time
 
+        def safe_folder_name(text:str)->str:
+            invalid='<>:"/\\|?*'
+            result=text
+            for ch in invalid:
+                result=result.replace(ch,'_')
+            result=result.strip()
+            return result if result else 'friend'
+
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
         if close_weixin is None:
@@ -2227,7 +2340,7 @@ class Moments():
         if save_detail and (not os.path.exists(target_folder) or not os.path.isdir(target_folder)):
             raise NotFolderError
         if save_detail and target_folder is not None:
-            friend_folder=os.path.join(target_folder,f'{friend}')
+            friend_folder=os.path.join(target_folder,safe_folder_name(friend))
             os.makedirs(friend_folder,exist_ok=True)
         posts=[]
         recorded_num=0
@@ -2251,10 +2364,19 @@ class Moments():
                     listitem=sns_detail_list.children(control_type='ListItem')[0]
                     content,photo_num,video_num,post_time=parse_friend_post(listitem)
                     posts.append({'内容':content,'图片数量':photo_num,'视频数量':video_num,'发布时间':post_time})
-                    if save_detail:
+                    should_save_detail=save_detail
+                    if should_save_detail and detail_content_filter is not None:
+                        try:
+                            should_save_detail=bool(detail_content_filter(content))
+                        except Exception:
+                            should_save_detail=False
+                    if should_save_detail:
                         detail_folder=os.path.join(friend_folder,f'{recorded_num}')
                         os.makedirs(detail_folder,exist_ok=True)
-                        save_media(sns_detail_list,photo_num,detail_folder,content)
+                        try:
+                            save_media(sns_detail_list,photo_num,detail_folder,content)
+                        except Exception as exc:
+                            warn(f'保存朋友圈详情失败，已跳过(record={recorded_num}): {exc}')
                     recorded_num+=1
                     backbutton.click_input()
                     if is_at_bottom(moments_list,selected[0]):
@@ -2308,18 +2430,11 @@ class Moments():
 
         def comment(content_listitem:ListItemWrapper,comment_listitem:ListItemWrapper,content:str):
             #评论操作
-            mouse.move(coords=center_point)
-            ellipsis_area=(content_listitem.rectangle().right-40,content_listitem.rectangle().bottom-15)#省略号按钮所处位置
-            mouse.click(coords=ellipsis_area)
-            reply=callback(content) 
-            comment_button.click_input()
-            pyautogui.hotkey('ctrl','a')
-            pyautogui.press('backspace')
-            SystemSettings.copy_text_to_windowsclipboard(text=reply)
-            pyautogui.hotkey('ctrl','v')
-            rectangle=comment_listitem.rectangle()
-            send_button_area=(rectangle.right-70,rectangle.bottom-50)
-            mouse.click(coords=send_button_area)
+            Moments._comment_flow(
+                moments_window,content_listitem,content,
+                anchor_mode='list',anchor_source=comment_listitem,
+                pre_move_coords=center_point,
+                callback=callback)
 
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
@@ -2363,6 +2478,442 @@ class Moments():
         moments_window.close()
         return posts
 
+    def dump_all_friend_moments(friend:str,save_detail:bool=False,target_folder:str=None,is_maximize:bool=None,close_weixin:bool=None,detail_content_filter:Callable[[str],bool]|None=None)->list[dict]:
+        '''
+        该方法用于导出某个好友当前可访问的全部朋友圈内容。
+        注意: 微信可见历史范围受客户端与账号状态影响,并非无限历史。
+        Args:
+            friend: 好友备注
+            save_detail: 是否保存每条朋友圈详情(文本/截图/图片)
+            target_folder: 保存详情目录
+            is_maximize: 微信界面是否全屏
+            close_weixin: 任务结束是否关闭微信
+            detail_content_filter:详情保存过滤函数，传入朋友圈文本，返回True时才保存详情
+        '''
+        return Moments.dump_friend_moments(
+            friend=friend,
+            number=9999,
+            save_detail=save_detail,
+            target_folder=target_folder,
+            is_maximize=is_maximize,
+            close_weixin=close_weixin,
+            detail_content_filter=detail_content_filter,
+        )
+
+    @staticmethod
+    def fetch_and_comment_friend_moment(
+        friend: str,
+        ai_callback,  # 接收内容和图片路径，返回评论文本或None
+        target_folder: str = None,
+        is_maximize: bool = None,
+        close_weixin: bool = None,
+        include_keywords: list = None,
+        exclude_keywords: list = None,
+        last_fingerprint: str = None
+    ) -> dict:
+        """
+        一次打开朋友圈，完成：读取内容 → AI识别 → 评论
+
+        Args:
+            friend: 好友备注
+            ai_callback: AI回调函数，签名: ai_callback(content, image_paths) -> str|None
+            target_folder: 保存详情的目录
+            is_maximize: 是否全屏
+            close_weixin: 完成后是否关闭微信
+
+        Returns:
+            {
+                'success': bool,
+                'content': str,
+                'image_count': int,
+                'publish_time': str,
+                'fingerprint': str,
+                'ai_answer': str|None,
+                'comment_posted': bool,
+                'error': str|None
+            }
+        """
+        import hashlib
+
+        if is_maximize is None:
+            is_maximize = GlobalConfig.is_maximize
+        if close_weixin is None:
+            close_weixin = GlobalConfig.close_weixin
+        if target_folder is None:
+            target_folder = os.path.join(os.getcwd(), 'rush_moments_cache')
+        os.makedirs(target_folder, exist_ok=True)
+
+        result = {
+            'success': False,
+            'content': '',
+            'image_count': 0,
+            'publish_time': '',
+            'fingerprint': '',
+            'ai_answer': None,
+            'comment_posted': False,
+            'error': None,
+            'image_paths': [],
+            'screenshot_path': '',
+            'detail_folder': ''
+        }
+
+        moments_window = None
+        try:
+            print("[流程] 打开朋友圈...")
+            moments_window = Navigator.open_friend_moments(friend=friend, is_maximize=is_maximize, close_weixin=False)
+            win32gui.SendMessage(moments_window.handle, win32con.WM_SYSCOMMAND, win32con.SC_MAXIMIZE, 0)
+
+            print("[流程] 定位到朋友圈列表...")
+            moments_list = moments_window.child_window(**Lists.MomentsList)
+            moments_list.type_keys('{PGDN}')
+            moments_list.type_keys('{PGUP}')
+
+            # 定位首条朋友圈
+            not_contents = ['mmui::AlbumBaseCell', 'mmui::AlbumTopCell']
+            for _ in range(6):
+                moments_list.type_keys('{DOWN}', pause=0.05)
+                selected = [li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
+                if selected and selected[0].class_name() not in not_contents:
+                    selected[0].click_input()
+                    break
+
+            print("[流程] 读取朋友圈内容...")
+            sns_detail_list = moments_window.child_window(**Lists.SnsDetailList)
+            detail_items = sns_detail_list.children(control_type='ListItem')
+            if not detail_items:
+                result['error'] = '无法获取朋友圈详情'
+                return result
+
+            detail_item = detail_items[0]
+
+            # 读取内容
+            content = ''
+            publish_time = ''
+            image_count = 0
+
+            try:
+                content = detail_item.window_text().strip()
+            except:
+                pass
+
+            # 解析图片数量和时间
+            try:
+                match = re.search(r'包含(\d+)张图片', content)
+                if match:
+                    image_count = int(match.group(1))
+            except:
+                pass
+            try:
+                for part in content.split():
+                    if '分钟' in part or '小时' in part or ':' in part:
+                        publish_time = part
+                        break
+            except:
+                pass
+
+            result['content'] = content
+            result['publish_time'] = publish_time
+            result['image_count'] = image_count
+
+            # 生成指纹
+            hasher = hashlib.sha1()
+            hasher.update(content.encode('utf-8', errors='ignore'))
+            hasher.update(publish_time.encode('utf-8', errors='ignore'))
+            hasher.update(str(image_count).encode('utf-8'))
+            result['fingerprint'] = hasher.hexdigest()
+
+            print(f"[流程] 内容: {content[:50]}... 图片: {image_count}")
+
+            # 关键词过滤（尽早判断，不匹配直接返回）
+            if include_keywords:
+                if not any(kw in content for kw in include_keywords):
+                    print(f"[流程] 不含关键词，跳过")
+                    result['success'] = True
+                    return result
+            if exclude_keywords:
+                if any(kw in content for kw in exclude_keywords):
+                    print(f"[流程] 包含排除词，跳过")
+                    result['success'] = True
+                    return result
+
+            # 准备输出目录
+            run_folder = os.path.join(target_folder, f'{friend}_{int(time.time()*1000)}')
+            os.makedirs(run_folder, exist_ok=True)
+
+            # 提取高清图片（优先，比UI截图清晰）
+            if image_count > 0:
+                try:
+                    print(f"[流程] 提取高清图片（共{image_count}张）...")
+                    sns_detail_list_rect = sns_detail_list.rectangle()
+                    # 点击图片区域打开大图
+                    comment_items = sns_detail_list.children(control_type='ListItem')
+                    if len(comment_items) > 1:
+                        ci_rect = comment_items[1].rectangle()
+                        mouse.click(coords=(ci_rect.left + 120, ci_rect.top - 80))
+                    else:
+                        mouse.click(coords=(sns_detail_list_rect.mid_point().x, sns_detail_list_rect.mid_point().y))
+                    time.sleep(0.3)
+                    # 先导航到第一张
+                    pyautogui.press('left', presses=image_count, interval=0.15)
+                    time.sleep(0.1)
+                    hd_image_paths = []
+                    right_click_pos = (sns_detail_list_rect.mid_point().x + 20, sns_detail_list_rect.mid_point().y + 25)
+                    for i in range(image_count):
+                        try:
+                            sns_detail_list.right_click_input(coords=right_click_pos)
+                            copy_menu = moments_window.child_window(**MenuItems.CopyMenuItem)
+                            if copy_menu.exists(timeout=0.3):
+                                copy_menu.click_input()
+                                time.sleep(0.5)
+                                img_path = os.path.join(run_folder, f'{i}.png')
+                                SystemSettings.save_pasted_image(img_path)
+                                if os.path.isfile(img_path):
+                                    hd_image_paths.append(img_path)
+                                    print(f"[流程] 高清图片 {i}: {img_path}")
+                        except Exception as exc:
+                            print(f"[流程] 提取图片{i}失败: {exc}")
+                        finally:
+                            pyautogui.press('right', interval=0.05)
+                    pyautogui.press('esc')
+                    time.sleep(0.1)
+                    if hd_image_paths:
+                        result['image_paths'] = hd_image_paths
+                        print(f"[流程] 已提取 {len(hd_image_paths)} 张高清图片")
+                except Exception as e:
+                    print(f"[流程] 高清图片提取失败: {e}")
+                    pyautogui.press('esc')  # 确保退出大图模式
+
+            # 没有高清图片时回退截图
+            if not result['image_paths']:
+                try:
+                    screenshot_path = os.path.join(run_folder, '内容截图.png')
+                    detail_item.capture_as_image().save(screenshot_path)
+                    result['screenshot_path'] = screenshot_path
+                    result['image_paths'] = [screenshot_path]
+                    print(f"[流程] 回退截图: {screenshot_path}")
+                except Exception as e:
+                    print(f"[流程] 截图失败: {e}")
+
+            result['detail_folder'] = run_folder
+            result['success'] = True
+
+            # 调用AI识别
+            print("[流程] 调用AI识别...")
+            ai_answer = None
+            try:
+                ai_answer = ai_callback(content, result['image_paths'])
+                result['ai_answer'] = ai_answer
+                print(f"[流程] AI答案: {ai_answer}")
+            except Exception as e:
+                print(f"[流程] AI调用失败: {e}")
+                result['error'] = f'AI调用失败: {e}'
+                return result
+
+            # 统一为列表格式（兼容字符串和列表）
+            if isinstance(ai_answer, list):
+                answer_list = [a.strip() for a in ai_answer if isinstance(a, str) and a.strip()]
+            elif isinstance(ai_answer, str) and ai_answer.strip():
+                answer_list = [ai_answer.strip()]
+            else:
+                answer_list = []
+
+            if not answer_list:
+                print("[流程] AI未返回答案，跳过评论")
+                return result
+
+            # 逐条发送评论（支持 OCR+AI 双发容错）
+            print(f"[流程] 开始评论: {answer_list} (共{len(answer_list)}条)")
+            try:
+                # 查找 detail 模式锚点
+                sns_detail_list = moments_window.child_window(**Lists.SnsDetailList)
+                comment_cell = None
+                for _item in sns_detail_list.children(control_type='ListItem'):
+                    if 'Comment' in _item.class_name():
+                        comment_cell = _item
+                        break
+                if comment_cell is None:
+                    _items = sns_detail_list.children(control_type='ListItem')
+                    if len(_items) > 1:
+                        comment_cell = _items[-1]
+
+                Moments._comment_flow(
+                    moments_window, detail_item, answer_list,
+                    anchor_mode='detail', anchor_source=comment_cell,
+                    use_offset_fix=True, clear_first=False)
+                result['comment_posted'] = True
+                print(f"[流程] 评论完成，共发送 {len(answer_list)} 条")
+
+            except Exception as e:
+                print(f"[流程] 评论失败: {e}")
+                import traceback
+                traceback.print_exc()
+                result['error'] = f'评论失败: {e}'
+
+            return result
+
+        except Exception as e:
+            result['error'] = str(e)
+            import traceback
+            traceback.print_exc()
+            return result
+
+        finally:
+            if moments_window is not None and close_weixin:
+                try:
+                    moments_window.close()
+                except:
+                    pass
+
+    @staticmethod
+    def get_latest_friend_moment(friend:str,target_folder:str=None,is_maximize:bool=None,close_weixin:bool=None)->(dict|None):
+        '''
+        该方法用于获取指定好友最新一条朋友圈内容及其本地详情路径,便于二次开发做轮询监听。
+        Args:
+            friend: 好友备注
+            target_folder: 保存详情的根目录,未传入时默认保存在当前目录
+            is_maximize: 微信界面是否全屏,默认取GlobalConfig
+            close_weixin: 任务结束后是否关闭微信,默认取GlobalConfig
+        Returns:
+            result: None或字典,示例:
+                {
+                    '好友': friend,
+                    '内容': 'xxx',
+                    '图片数量': 1,
+                    '视频数量': 0,
+                    '发布时间': '3分钟前',
+                    'fingerprint': 'sha1...',
+                    'detail_folder': '...',
+                    'screenshot_path': '.../内容截图.png',
+                    'image_paths': ['.../0.png']
+                }
+        '''
+        if is_maximize is None:
+            is_maximize=GlobalConfig.is_maximize
+        if close_weixin is None:
+            close_weixin=GlobalConfig.close_weixin
+        if target_folder is None:
+            target_folder=os.path.join(os.getcwd(),'rush_moments_cache')
+        os.makedirs(target_folder,exist_ok=True)
+        run_folder=os.path.join(target_folder,f'{friend}_{int(time.time()*1000)}')
+        os.makedirs(run_folder,exist_ok=True)
+        posts=Moments.dump_friend_moments(
+            friend=friend,
+            number=1,
+            save_detail=True,
+            target_folder=run_folder,
+            is_maximize=is_maximize,
+            close_weixin=close_weixin
+        )
+        if not posts:
+            return None
+        post=posts[0]
+        friend_folder=os.path.join(run_folder,friend)
+        detail_folder=''
+        image_paths=[]
+        screenshot_path=''
+        if os.path.isdir(friend_folder):
+            detail_folders=[os.path.join(friend_folder,name) for name in os.listdir(friend_folder)
+                if os.path.isdir(os.path.join(friend_folder,name))]
+            if detail_folders:
+                detail_folders.sort(key=lambda p: os.path.basename(p))
+                detail_folder=detail_folders[0]
+                screenshot_path=os.path.join(detail_folder,'内容截图.png')
+                image_paths=[os.path.join(detail_folder,name) for name in os.listdir(detail_folder)
+                    if name.lower().endswith('.png') and name!='内容截图.png']
+                image_paths.sort()
+        hasher=hashlib.sha1()
+        hasher.update(str(post.get('内容','')).encode('utf-8'))
+        hasher.update(str(post.get('发布时间','')).encode('utf-8'))
+        hasher.update(str(post.get('图片数量',0)).encode('utf-8'))
+        hasher.update(str(post.get('视频数量',0)).encode('utf-8'))
+        if image_paths and os.path.isfile(image_paths[0]):
+            with open(image_paths[0],'rb') as f:
+                hasher.update(f.read())
+        return {
+            '好友':friend,
+            '内容':post.get('内容',''),
+            '图片数量':post.get('图片数量',0),
+            '视频数量':post.get('视频数量',0),
+            '发布时间':post.get('发布时间',''),
+            'fingerprint':hasher.hexdigest(),
+            'detail_folder':detail_folder,
+            'screenshot_path':screenshot_path,
+            'image_paths':image_paths
+        }
+
+    @staticmethod
+    def comment_friend_moment(friend:str,comment_text:str,is_maximize:bool=None,close_weixin:bool=None)->bool:
+        '''
+        该方法用于给指定好友最新一条朋友圈自动评论
+        Args:
+            friend: 好友备注
+            comment_text: 评论内容
+            is_maximize: 微信界面是否全屏,默认取GlobalConfig
+            close_weixin: 任务结束后是否关闭微信,默认取GlobalConfig
+        Returns:
+            is_success: 评论是否成功发送
+        '''
+        if is_maximize is None:
+            is_maximize=GlobalConfig.is_maximize
+        if close_weixin is None:
+            close_weixin=GlobalConfig.close_weixin
+        if not comment_text or not comment_text.strip():
+            print("[评论] 错误：评论内容为空")
+            return False
+        moments_window=None
+        try:
+            print(f"[评论] 开始评论流程，目标好友: {friend}")
+            not_contents=['mmui::AlbumBaseCell','mmui::AlbumTopCell']
+            moments_window=Navigator.open_friend_moments(
+                friend=friend,is_maximize=is_maximize,close_weixin=close_weixin)
+            print("[评论] 已打开朋友圈窗口")
+            win32gui.SendMessage(
+                moments_window.handle,win32con.WM_SYSCOMMAND,win32con.SC_MAXIMIZE,0)
+            moments_list=moments_window.child_window(**Lists.MomentsList)
+            moments_list.type_keys('{PGDN}')
+            moments_list.type_keys('{PGUP}')
+            print("[评论] 已定位到朋友圈列表")
+            for _ in range(6):
+                moments_list.type_keys('{DOWN}',pause=0.05)
+                selected=[li for li in moments_list.children(control_type='ListItem')
+                          if li.has_keyboard_focus()]
+                if selected and selected[0].class_name() not in not_contents:
+                    selected[0].click_input()
+                    print("[评论] 已点击首条朋友圈")
+                    break
+            sns_detail_list=moments_window.child_window(**Lists.SnsDetailList)
+            if not sns_detail_list.children(control_type='ListItem'):
+                print("[评论] 错误：无法获取朋友圈详情列表")
+                return False
+            detail_item=sns_detail_list.children(control_type='ListItem')[0]
+            print("[评论] 已获取朋友圈详情")
+            # 查找 detail 模式锚点
+            comment_cell=None
+            for _item in sns_detail_list.children(control_type='ListItem'):
+                if 'Comment' in _item.class_name():
+                    comment_cell=_item
+                    break
+            if comment_cell is None:
+                _items=sns_detail_list.children(control_type='ListItem')
+                if len(_items)>1:
+                    comment_cell=_items[-1]
+            Moments._comment_flow(
+                moments_window,detail_item,comment_text.strip(),
+                anchor_mode='detail',anchor_source=comment_cell,
+                clear_first=False)
+            print("[评论] 评论操作完成")
+            return True
+        except Exception as e:
+            print(f"[评论] 异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            if moments_window is not None:
+                try:
+                    moments_window.close()
+                except Exception:
+                    pass
 
 
 class Messages():

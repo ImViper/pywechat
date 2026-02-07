@@ -6,3 +6,4 @@ pywin32-ctypes>=0.2.2
 pywinauto>=0.6.8
 pillow>=11.1.0
 emoji>=2.14.1
+volcengine-python-sdk[ark]

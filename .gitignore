@@ -1,3 +1,31 @@
 .venv
 *.pyc
 __pycache__
+
+# Test/runtime artifacts
+.pytest_cache/
+*.log
+logs/
+rush_moments_cache/
+rush_moments_cache_test_*/
+test_moments_output/
+dataset/
+rush_state.json
+rush_state_test_*.json
+rush_state_*.json
+
+# Local secrets
+config/.local_secrets.json
+
+# Local debug/benchmark artifacts
+benchmark_results.json
+ocr_test_results.json
+debug_*.png
+debug_*.jpg
+debug_screenshots/
+d2187aa28bb045bbf0b39b225aba70aa.jpg
+tests/*.jpg
+tests/*.png
+
+# Local archived notes (not part of repo docs)
+archive/docs_legacy/

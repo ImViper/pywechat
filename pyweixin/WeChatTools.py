@@ -93,6 +93,7 @@ import win32api
 import pyautogui
 import win32gui
 import win32con
+import win32process
 import win32com.client
 from typing import Literal
 from .Config import GlobalConfig
@@ -100,6 +101,7 @@ from .Errors import NetWorkNotConnectError#所有可能出现的异常
 from .Errors import NoSuchFriendError
 from .Errors import NotFriendError
 from .Errors import NoResultsError,NotInstalledError
+from .Errors import NotStartError
 from pywinauto import mouse,Desktop
 from pywinauto.controls.uia_controls import ListViewWrapper,ListItemWrapper,EditWrapper #TypeHint要用到
 from pywinauto import WindowSpecification
@@ -139,18 +141,50 @@ class WxWindowManage():
         classname=win32gui.GetClassName(hwnd)
         if self.classname_pattern.match(classname):
             self.possible_windows.append(hwnd) 
+
+    def is_weixin_hwnd(self,hwnd):
+        """判断句柄是否属于Weixin.exe主进程窗口"""
+        try:
+            _,pid=win32process.GetWindowThreadProcessId(hwnd)
+            if not pid:
+                return False
+            name=psutil.Process(pid).name().lower()
+            return name=='weixin.exe'
+        except Exception:
+            return False
     
     def find_wx_window(self):
         '''当微信在运行时,即使关闭掉窗口。win32gui也可以找到窗口句柄
         不过win32gui获取到的classname是通用的qt窗口类名
         pywinauto可以获取到真正的窗口类名mmui::,其中mm与微信移动版的package包名一致
         猜测是微信为了全平台的一致性''' 
-        win32gui.EnumDesktopWindows(0,self.filter,None)       
-        self.possible_windows=[hwnd for hwnd in self.possible_windows 
-            if 'mmui::MainWindow' in desktop.window(handle=hwnd).class_name() or 'mmui::LoginWindow' in desktop.window(handle=hwnd).class_name()]
-        if self.possible_windows:
-            self.hwnd=self.possible_windows[0]
-            if desktop.window(handle=self.hwnd).class_name()=='mmui::LoginWindow':
+        self.possible_windows=[]
+        self.hwnd=0
+        self.window_type=1
+        win32gui.EnumDesktopWindows(0,self.filter,None)
+        strict=[]
+        fallback=[]
+        for hwnd in self.possible_windows:
+            if not self.is_weixin_hwnd(hwnd):
+                continue
+            try:
+                wnd=desktop.window(handle=hwnd)
+                uia_class=wnd.class_name()
+                title=wnd.window_text()
+                if 'mmui::MainWindow' in uia_class or 'mmui::LoginWindow' in uia_class:
+                    strict.append((hwnd,uia_class,title))
+                    continue
+                # 新版微信有时只能拿到 Qt 类名,此时退化按可见窗口+标题识别
+                if win32gui.IsWindowVisible(hwnd) and ('微信' in title or 'Weixin' in title or 'WeChat' in title):
+                    fallback.append((hwnd,uia_class,title))
+            except Exception:
+                continue
+        candidates=strict if strict else fallback
+        if candidates:
+            self.hwnd=candidates[0][0]
+            uia_class=candidates[0][1]
+            title=candidates[0][2]
+            if 'mmui::LoginWindow' in uia_class or ('登录' in title):
                 self.window_type=0#登录界面
         return self.hwnd
 
@@ -560,6 +594,33 @@ class Tools():
 class Navigator():
 
     '''打开微信内一切能打开的界面'''
+    @staticmethod
+    def _find_sidebar_item(main_window: WindowSpecification, item_spec: dict) -> WindowSpecification:
+        """
+        兼容微信 4.1+ 侧边栏控件类型变化:
+        旧版本常见为 Button, 新版本可能是 TabItem 或其他类型。
+        """
+        spec = dict(item_spec)
+        candidates: list[dict] = []
+        candidates.append(spec)
+        if spec.get('control_type') == 'Button':
+            tabitem_spec = dict(spec)
+            tabitem_spec['control_type'] = 'TabItem'
+            candidates.append(tabitem_spec)
+        no_type_spec = dict(spec)
+        no_type_spec.pop('control_type', None)
+        candidates.append(no_type_spec)
+        if 'class_name' in spec:
+            no_class_spec = dict(spec)
+            no_class_spec.pop('class_name', None)
+            candidates.append(no_class_spec)
+
+        for candidate in candidates:
+            ui = main_window.child_window(**candidate)
+            if ui.exists(timeout=0.2):
+                return ui
+        raise RuntimeError(f'未找到侧边栏控件: {item_spec}')
+
     @staticmethod 
     def open_weixin(is_maximize:bool=None)->WindowSpecification:
         '''打开微信,不登录情况效果不是很好,建议登录'''
@@ -603,11 +664,27 @@ class Navigator():
 
         wx=WxWindowManage()
         is_running=Tools.is_weixin_running()
+        weixin_path=''
         if not is_running:#微信不在运行,主界面看不到窗口，需要先启动
             weixin_path=Tools.where_weixin(copy_to_clipboard=False)
             os.startfile(weixin_path)
+        # 可能存在微信后台进程仍在,但主界面窗口已关闭/未激活的情况，避免无限等待
+        launch_retry=False
+        start_timestamp=time.time()
+        wait_timeout=15.0
         handle=wx.find_wx_window()
         while not handle:
+            elapsed=time.time()-start_timestamp
+            if elapsed>2.5 and (not launch_retry):
+                try:
+                    if not weixin_path:
+                        weixin_path=Tools.where_weixin(copy_to_clipboard=False)
+                    os.startfile(weixin_path)
+                    launch_retry=True
+                except Exception:
+                    pass
+            if elapsed>=wait_timeout:
+                raise NotStartError('未检测到微信主窗口(可能在后台运行但窗口未打开)。请手动打开微信主界面后重试。')
             handle=wx.find_wx_window()
             time.sleep(0.1)
         wx_window=desktop.window(handle=handle)
@@ -621,6 +698,18 @@ class Navigator():
         if offline_button.exists(timeout=0.1):
             main_window.close()
             raise NetWorkNotConnectError('当前网络不可用,无法进行UI自动化!')
+        # 新版微信在部分环境下不会向 UIA 暴露内部控件树(仅剩顶层 Pane),
+        # 这种情况下后续基于 child_window 的流程都会失败，提前给出明确报错。
+        try:
+            if len(main_window.descendants()) <= 1:
+                raise NotStartError(
+                    '检测到微信主窗口未暴露可操作UI控件树(当前仅1个Pane)。'
+                    '该微信版本/形态暂不兼容当前pywinauto流程，请尝试切换可自动化版本后重试。'
+                )
+        except NotStartError:
+            raise
+        except Exception:
+            pass
         return main_window
 
     @staticmethod
@@ -657,7 +746,7 @@ class Navigator():
         is_find=False
         main_window=Navigator.open_weixin(is_maximize=is_maximize)
         #先看看当前微信右侧界面是不是聊天界面可能存在不是聊天界面的情况比如是纯白色的微信的icon
-        chats_button=main_window.child_window(**SideBar.Chats)
+        chats_button=Navigator._find_sidebar_item(main_window=main_window,item_spec=SideBar.Chats)
         session_list=main_window.child_window(**Main_window.ConversationList)
         if not session_list.exists():
             chats_button.click_input()
@@ -1011,7 +1100,7 @@ class Navigator():
             time.sleep(1)
             search_results=main_window.child_window(**Main_window.SearchResult).wait(wait_for='ready',timeout=2)
             search_result=Tools.get_search_result(friend=friend,search_result=search_results)
-            chat_button=main_window.child_window(**SideBar.Chats)
+            chat_button=Navigator._find_sidebar_item(main_window=main_window,item_spec=SideBar.Chats)
             if search_result:
                 search_result.click_input()
                 edit_area=main_window.child_window(**Edits.CurrentChatEdit)
@@ -1025,7 +1114,7 @@ class Navigator():
         else: #searchpages为0，不在会话列表查找
             #这部分代码先判断微信主界面是否可见,如果可见不需要重新打开,这在多个close_wechat为False需要进行来连续操作的方式使用时要用到
             main_window=Navigator.open_weixin(is_maximize=is_maximize)
-            chat_button=main_window.child_window(**SideBar.Chats)
+            chat_button=Navigator._find_sidebar_item(main_window=main_window,item_spec=SideBar.Chats)
             session_list=main_window.child_window(**Main_window.ConversationList)
             #先看看当前聊天界面是不是好友的聊天界面
             current_chat=main_window.child_window(**Edits.CurrentChatEdit)
@@ -1101,7 +1190,7 @@ class Navigator():
             close_weixin=GlobalConfig.close_weixin
 
         main_window=Navigator.open_weixin(is_maximize=is_maximize)
-        chat_button=main_window.child_window(**SideBar.Chats)
+        chat_button=Navigator._find_sidebar_item(main_window=main_window,item_spec=SideBar.Chats)
         chat_button.click_input()
         session_list=main_window.child_window(**Main_window.ConversationList)
         search=main_window.descendants(**Main_window.Search)[0]
@@ -1172,7 +1261,7 @@ class Navigator():
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
         main_window=Navigator.open_weixin()
-        chat_button=main_window.child_window(**SideBar.Chats)
+        chat_button=Navigator._find_sidebar_item(main_window=main_window,item_spec=SideBar.Chats)
         quick_actions_button=main_window.child_window(**Buttons.QuickActionsButton)
         quick_actions_list=main_window.child_window(**Lists.QuickActionsList)
         chat_button.click_input()
