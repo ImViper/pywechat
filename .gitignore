@@ -29,3 +29,16 @@ tests/*.png
 
 # Local archived notes (not part of repo docs)
 archive/docs_legacy/
+
+# Local scratch workspace (manual debug scripts / temporary notes)
+local_workspace/
+
+# Root-level local helper scripts and notes (do not commit)
+/TEST_QUICK.md
+/benchmark_ai_providers.py
+/debug_comment.py
+/debug_comment2.py
+/debug_send_button.py
+/test_ai_answer.py
+/test_ocr_benchmark.py
+/test_ocr_count.py
