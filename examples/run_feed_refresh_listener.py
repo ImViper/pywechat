@@ -1,12 +1,12 @@
-"""总朋友圈刷新监听模式（常驻窗口）.
+﻿"""鎬绘湅鍙嬪湀鍒锋柊鐩戝惉妯″紡锛堝父椹荤獥鍙ｏ級.
 
-用法:
-    python examples/run_feed_refresh_listener.py 19:15 小蔡 [轮询秒数]
+鐢ㄦ硶:
+    python examples/run_feed_refresh_listener.py 19:15 灏忚敗 [杞绉掓暟]
 
-说明:
-    - 第一个参数: 发布时间（如 19:15）
-    - 第二个参数: 目标作者（总朋友圈中要监听的作者关键字）
-    - 自动设置: 提前2分钟开始监控，发布后5分钟结束（共7分钟）
+璇存槑:
+    - 绗竴涓弬鏁? 鍙戝竷鏃堕棿锛堝 19:15锛?
+    - 绗簩涓弬鏁? 鐩爣浣滆€咃紙鎬绘湅鍙嬪湀涓鐩戝惉鐨勪綔鑰呭叧閿瓧锛?
+    - 鑷姩璁剧疆: 鎻愬墠2鍒嗛挓寮€濮嬬洃鎺э紝鍙戝竷鍚?鍒嗛挓缁撴潫锛堝叡7鍒嗛挓锛?
 """
 
 import json
@@ -25,7 +25,7 @@ from pyweixin.rush_ai import ArkChatProvider, PaddleOCRProvider
 
 
 def load_api_key():
-    """从配置文件加载 API key"""
+    """浠庨厤缃枃浠跺姞杞?API key"""
     key_file = PROJECT_ROOT / "config" / ".local_secrets.json"
     if key_file.exists():
         try:
@@ -33,17 +33,17 @@ def load_api_key():
                 data = json.load(f)
                 return data.get("ARK_API_KEY", "")
         except Exception as e:
-            print(f"警告: 读取配置文件失败: {e}")
+            print(f"璀﹀憡: 璇诲彇閰嶇疆鏂囦欢澶辫触: {e}")
     return os.getenv("ARK_API_KEY", "")
 
 
 def main():
     if len(sys.argv) < 3:
-        print("用法: python examples/run_feed_refresh_listener.py <发布时间> <目标作者> [轮询秒数]")
+        print("鐢ㄦ硶: python examples/run_feed_refresh_listener.py <鍙戝竷鏃堕棿> <鐩爣浣滆€? [杞绉掓暟]")
         print()
-        print("示例:")
-        print("  python examples/run_feed_refresh_listener.py 19:15 小蔡")
-        print("  python examples/run_feed_refresh_listener.py 13:45 孙大炮 0.5")
+        print("绀轰緥:")
+        print("  python examples/run_feed_refresh_listener.py 19:15 灏忚敗")
+        print("  python examples/run_feed_refresh_listener.py 13:45 瀛欏ぇ鐐?0.5")
         sys.exit(1)
 
     publish_time_str = sys.argv[1]
@@ -53,9 +53,9 @@ def main():
         try:
             poll_interval = float(sys.argv[3])
         except Exception:
-            print(f"警告: 轮询秒数格式无效 '{sys.argv[3]}'，改用默认 0.5s")
+            print(f"璀﹀憡: 杞绉掓暟鏍煎紡鏃犳晥 '{sys.argv[3]}'锛屾敼鐢ㄩ粯璁?0.5s")
             poll_interval = 0.5
-    # 太小容易触发 UI 不稳定，设置安全下限
+    # 澶皬瀹规槗瑙﹀彂 UI 涓嶇ǔ瀹氾紝璁剧疆瀹夊叏涓嬮檺
     poll_interval = max(0.2, poll_interval)
 
     try:
@@ -65,50 +65,65 @@ def main():
         start_dt = publish_dt - timedelta(minutes=2)
         end_dt = publish_dt + timedelta(minutes=5)
     except Exception:
-        print(f"错误: 时间格式不正确 '{publish_time_str}'")
-        print("正确格式: 1:52 或 13:45")
+        print(f"閿欒: 鏃堕棿鏍煎紡涓嶆纭?'{publish_time_str}'")
+        print("姝ｇ‘鏍煎紡: 1:52 鎴?13:45")
         sys.exit(1)
 
     api_key = load_api_key()
     if not api_key:
-        print("错误: 未找到 ARK_API_KEY")
-        print("请在 config/.local_secrets.json 中配置或设置环境变量")
+        print("閿欒: 鏈壘鍒?ARK_API_KEY")
+        print("璇峰湪 config/.local_secrets.json 涓厤缃垨璁剧疆鐜鍙橀噺")
         sys.exit(1)
 
     ai_provider = ArkChatProvider(api_key=api_key)
+    compare_with_ai_after_ocr_hit = os.getenv("PYWEIXIN_COMPARE_AI_AFTER_OCR_HIT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
     ocr_provider = None
     try:
-        print("正在加载 OCR 模型...")
-        ocr_provider = PaddleOCRProvider(lang="ch", show_log=False)
-        # 预热模型，避免首次识别时卡顿
+        print("姝ｅ湪鍔犺浇 OCR 妯″瀷...")
+        ocr_provider = PaddleOCRProvider(
+            lang="ch",
+            show_log=False,
+            use_angle_cls=False,
+            enable_mkldnn=False,
+            text_detection_model_name=os.getenv("PYWEIXIN_OCR_DET_MODEL", "PP-OCRv5_mobile_det"),
+            text_recognition_model_name=os.getenv("PYWEIXIN_OCR_REC_MODEL", "PP-OCRv5_mobile_rec"),
+            cpu_threads=int(os.getenv("PYWEIXIN_OCR_CPU_THREADS", "8")),
+            text_det_limit_side_len=int(os.getenv("PYWEIXIN_OCR_MAX_SIDE", "1200")),
+            text_det_limit_type=os.getenv("PYWEIXIN_OCR_LIMIT_TYPE", "max"),
+        )
+        # 棰勭儹妯″瀷锛岄伩鍏嶉娆¤瘑鍒椂鍗￠】
         ocr_provider._get_ocr()
-        print("OCR 模型加载完成")
+        print("OCR 妯″瀷鍔犺浇瀹屾垚")
     except Exception:
         ocr_provider = None
-        print("警告: PaddleOCR 未安装，跳过 OCR 辅助（pip install paddleocr paddlepaddle）")
+        print("警告：PaddleOCR 未安装，跳过 OCR 辅助（pip install paddleocr paddlepaddle）")
 
     output_dir = f"rush_moments_cache_feed_{target_author}"
     state_file = f"rush_state_feed_{target_author}.json"
-    include_keywords = ["题目", "抢答", "图中", "多少", "几个", "几位"]
-    exclude_keywords = ["无效", "取消"]
+    include_keywords = ["棰樼洰", "鎶㈢瓟", "鍥句腑", "澶氬皯", "鍑犱釜", "鍑犱綅"]
+    exclude_keywords = ["鏃犳晥", "鍙栨秷"]
     os.makedirs(output_dir, exist_ok=True)
     hold_window_after_comment = True
 
     print("=" * 60)
-    print("总朋友圈刷新监听（常驻窗口 + 刷新按钮）")
+    print("鎬绘湅鍙嬪湀鍒锋柊鐩戝惉锛堝父椹荤獥鍙?+ 鍒锋柊鎸夐挳锛?")
     print("=" * 60)
-    print(f"目标作者: {target_author}")
-    print(f"预计发布: {publish_dt.strftime('%Y-%m-%d %H:%M')}")
-    print(f"监控开始: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} (提前2分钟)")
-    print(f"监控结束: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} (发布后5分钟)")
-    print(f"监控时长: 7 分钟")
-    print(f"轮询间隔: {poll_interval:.2f} 秒")
-    print(f"输出目录: {output_dir}")
+    print(f"鐩爣浣滆€? {target_author}")
+    print(f"棰勮鍙戝竷: {publish_dt.strftime('%Y-%m-%d %H:%M')}")
+    print(f"鐩戞帶寮€濮? {start_dt.strftime('%Y-%m-%d %H:%M:%S')} (鎻愬墠2鍒嗛挓)")
+    print(f"鐩戞帶缁撴潫: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} (鍙戝竷鍚?鍒嗛挓)")
+    print(f"鐩戞帶鏃堕暱: 7 鍒嗛挓")
+    print(f"杞闂撮殧: {poll_interval:.2f} 绉?")
+    print(f"杈撳嚭鐩綍: {output_dir}")
     print("=" * 60)
     print()
-    print("等待监控时间窗口...")
-    print("按 Ctrl+C 可随时停止")
+    print("绛夊緟鐩戞帶鏃堕棿绐楀彛...")
+    print("鎸?Ctrl+C 鍙殢鏃跺仠姝?")
     print()
 
     state = {}
@@ -124,7 +139,7 @@ def main():
             json.dump(state, f, ensure_ascii=False, indent=2)
 
     def try_ocr_count(content, image_paths):
-        """尝试用 OCR 直接计数回答，返回答案字符串或 None"""
+        """灏濊瘯鐢?OCR 鐩存帴璁℃暟鍥炵瓟锛岃繑鍥炵瓟妗堝瓧绗︿覆鎴?None"""
         if ocr_provider is None or not image_paths:
             return None
 
@@ -135,10 +150,10 @@ def main():
             target = m.group(1)
 
         if not target:
-            print("[OCR] 未从题目中提取到引号关键词，跳过 OCR")
+            print("[OCR] 鏈粠棰樼洰涓彁鍙栧埌寮曞彿鍏抽敭璇嶏紝璺宠繃 OCR")
             return None
 
-        print(f"[OCR] 目标关键词: '{target}'")
+        print(f"[OCR] 鐩爣鍏抽敭璇? '{target}'")
         start_time = time.time()
 
         total_count = 0
@@ -146,33 +161,33 @@ def main():
             try:
                 ocr_text = ocr_provider.extract_text(img_path)
                 if not ocr_text:
-                    print(f"[OCR] {os.path.basename(img_path)}: 未识别到文本")
+                    print(f"[OCR] {os.path.basename(img_path)}: 鏈瘑鍒埌鏂囨湰")
                     continue
 
                 texts = [line.strip() for line in ocr_text.splitlines() if line.strip()]
                 count = sum(txt.count(target) for txt in texts)
                 total_count += count
-                print(f"[OCR] {os.path.basename(img_path)}: 识别 {len(texts)} 个文本, 匹配 '{target}' {count} 次")
+                print(f"[OCR] {os.path.basename(img_path)}: 璇嗗埆 {len(texts)} 涓枃鏈? 鍖归厤 '{target}' {count} 娆?")
             except Exception as e:
-                print(f"[OCR] 识别失败 {img_path}: {e}")
+                print(f"[OCR] 璇嗗埆澶辫触 {img_path}: {e}")
 
         elapsed = int((time.time() - start_time) * 1000)
         if total_count > 0:
             answer = f"{total_count}{target}"
-            print(f"[OCR] 计数完成: '{answer}' (耗时 {elapsed}ms)")
+            print(f"[OCR] 璁℃暟瀹屾垚: '{answer}' (鑰楁椂 {elapsed}ms)")
             return answer
 
-        print(f"[OCR] 未匹配到 '{target}'，回退 AI (耗时 {elapsed}ms)")
+        print(f"[OCR] 鏈尮閰嶅埌 '{target}'锛屽洖閫€ AI (鑰楁椂 {elapsed}ms)")
         return None
 
     def try_ai_answer(content, image_paths):
-        """调用 AI 识别，返回答案字符串或 None"""
+        """璋冪敤 AI 璇嗗埆锛岃繑鍥炵瓟妗堝瓧绗︿覆鎴?None"""
         start_time = time.time()
         try:
             result = ai_provider.answer_from_text_and_images(content, image_paths, [])
             elapsed = int((time.time() - start_time) * 1000)
             if result is None:
-                print(f"[AI] 未返回答案 (耗时 {elapsed}ms)")
+                print(f"[AI] 鏈繑鍥炵瓟妗?(鑰楁椂 {elapsed}ms)")
                 return None
 
             answer = ""
@@ -199,35 +214,41 @@ def main():
                     break
 
             if answer:
-                print(f"[AI] 识别完成: '{answer}' (耗时 {elapsed}ms)")
+                print(f"[AI] 璇嗗埆瀹屾垚: '{answer}' (鑰楁椂 {elapsed}ms)")
                 return answer
-            print(f"[AI] 答案为空 (耗时 {elapsed}ms)")
+            print(f"[AI] 绛旀涓虹┖ (鑰楁椂 {elapsed}ms)")
             return None
         except Exception as e:
-            print(f"[AI] 识别失败: {e}")
+            print(f"[AI] 璇嗗埆澶辫触: {e}")
             import traceback
             traceback.print_exc()
             return None
 
     def ai_callback(content, image_paths):
-        """OCR 和 AI 都执行，返回答案列表（去重）"""
+        """Prefer OCR result first; call AI as fallback."""
         print(f"[识别] 开始... 内容长度={len(content)}, 图片数={len(image_paths)}")
+        callback_start = time.time()
         answers = []
 
         ocr_answer = try_ocr_count(content, image_paths)
         if ocr_answer:
             answers.append(ocr_answer)
+            if not compare_with_ai_after_ocr_hit:
+                elapsed = int((time.time() - callback_start) * 1000)
+                print(f"[识别] OCR命中，跳过AI，直接使用OCR答案 (总耗时 {elapsed}ms)")
+                return answers
+            print("[识别] OCR命中，但已开启对比模式，继续调用AI...")
 
-        print("[识别] 调用 AI...")
+        print("[识别] 调用AI...")
         ai_answer = try_ai_answer(content, image_paths)
         if ai_answer and ai_answer not in answers:
             answers.append(ai_answer)
 
         if answers:
-            print(f"[识别] 最终答案列表: {answers}")
+            elapsed = int((time.time() - callback_start) * 1000)
+            print(f"[识别] 最终答案列表: {answers} (总耗时 {elapsed}ms)")
             return answers
         return None
-
     from pyweixin.WeChatAuto import Moments
     from pyweixin.WeChatTools import Navigator
 
@@ -238,7 +259,7 @@ def main():
     moments_window = None
 
     if already_commented:
-        print("检测到已评论过，3秒后继续监听（会重置状态）...")
+        print("妫€娴嬪埌宸茶瘎璁鸿繃锛?绉掑悗缁х画鐩戝惉锛堜細閲嶇疆鐘舵€侊級...")
         time.sleep(3)
         already_commented = False
         state["commented"] = False
@@ -253,15 +274,15 @@ def main():
                 continue
 
             if now > end_dt:
-                print(f"[{now.strftime('%H:%M:%S')}] 监控时间结束")
+                print(f"[{now.strftime('%H:%M:%S')}] 鐩戞帶鏃堕棿缁撴潫")
                 break
 
             if already_commented:
-                print(f"[{now.strftime('%H:%M:%S')}] 已评论成功，退出监控")
+                print(f"[{now.strftime('%H:%M:%S')}] 宸茶瘎璁烘垚鍔燂紝閫€鍑虹洃鎺?")
                 break
 
             loops += 1
-            print(f"[{now.strftime('%H:%M:%S')}] 轮询 #{loops}...")
+            print(f"[{now.strftime('%H:%M:%S')}] 杞 #{loops}...")
 
             if moments_window is None:
                 try:
@@ -270,9 +291,9 @@ def main():
                         win32gui.SendMessage(moments_window.handle, win32con.WM_SYSCOMMAND, win32con.SC_MAXIMIZE, 0)
                     except Exception:
                         pass
-                    print(f"[{now.strftime('%H:%M:%S')}] 已打开总朋友圈窗口（常驻）")
+                    print(f"[{now.strftime('%H:%M:%S')}] 宸叉墦寮€鎬绘湅鍙嬪湀绐楀彛锛堝父椹伙級")
                 except Exception as e:
-                    print(f"[{now.strftime('%H:%M:%S')}] 打开总朋友圈失败: {e}")
+                    print(f"[{now.strftime('%H:%M:%S')}] 鎵撳紑鎬绘湅鍙嬪湀澶辫触: {e}")
                     time.sleep(poll_interval)
                     continue
 
@@ -290,7 +311,7 @@ def main():
             )
 
             if not result["success"]:
-                print(f"[{now.strftime('%H:%M:%S')}] 获取失败: {result.get('error', '未知错误')}")
+                print(f"[{now.strftime('%H:%M:%S')}] 鑾峰彇澶辫触: {result.get('error', '鏈煡閿欒')}")
                 if result.get("error"):
                     if moments_window is not None:
                         try:
@@ -304,7 +325,7 @@ def main():
             fingerprint = result["fingerprint"]
             content = result["content"]
             author = result.get("author", "")
-            print(f"[{now.strftime('%H:%M:%S')}] 作者: {author or '(未知)'} 内容: {content[:60] if content else '(空)'}...")
+            print(f"[{now.strftime('%H:%M:%S')}] 浣滆€? {author or '(鏈煡)'} 鍐呭: {content[:60] if content else '(绌?'}...")
 
             if result["comment_posted"] and result["ai_answer"]:
                 last_fingerprint = fingerprint
@@ -316,13 +337,13 @@ def main():
                 save_state()
                 print()
                 print("=" * 60)
-                print(f"已评论: {result['ai_answer']}")
-                print("如果自动发送失败，请手动点击发送按钮！")
+                print(f"宸茶瘎璁? {result['ai_answer']}")
+                print("濡傛灉鑷姩鍙戦€佸け璐ワ紝璇锋墜鍔ㄧ偣鍑诲彂閫佹寜閽紒")
                 print("=" * 60)
                 break
 
             if fingerprint == last_fingerprint:
-                print(f"[{now.strftime('%H:%M:%S')}] 无新帖子")
+                print(f"[{now.strftime('%H:%M:%S')}] 鏃犳柊甯栧瓙")
                 time.sleep(poll_interval)
                 continue
 
@@ -335,23 +356,23 @@ def main():
             time.sleep(poll_interval)
 
     except KeyboardInterrupt:
-        print("\n用户中断")
+        print("\n鐢ㄦ埛涓柇")
     except Exception as e:
-        print(f"\n错误: {e}")
+        print(f"\n閿欒: {e}")
         import traceback
         traceback.print_exc()
     finally:
         should_hold_open = hold_window_after_comment and commented_this_run
         if should_hold_open and moments_window is not None:
-            print("\n已按调试模式保留朋友圈窗口（未关闭），可直接截图观察。")
+            print("\n宸叉寜璋冭瘯妯″紡淇濈暀鏈嬪弸鍦堢獥鍙ｏ紙鏈叧闂級锛屽彲鐩存帴鎴浘瑙傚療銆?")
         elif moments_window is not None:
             try:
                 moments_window.close()
             except Exception:
                 pass
 
-    print("\n监控完成！")
-    print(f"最终状态: {state}")
+    print("\n鐩戞帶瀹屾垚锛?")
+    print(f"鏈€缁堢姸鎬? {state}")
 
 
 if __name__ == "__main__":

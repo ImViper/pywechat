@@ -68,10 +68,16 @@ class PaddleOCRProvider:
     Install: pip install paddleocr paddlepaddle
     """
 
-    _ocr_instance = None
+    _ocr_cache = {}
     use_angle_cls: bool = True
     lang: str = "ch"  # 'ch' for Chinese, 'en' for English
     show_log: bool = False
+    enable_mkldnn: bool = False
+    text_detection_model_name: str | None = None
+    text_recognition_model_name: str | None = None
+    cpu_threads: int | None = None
+    text_det_limit_side_len: int | None = 1200
+    text_det_limit_type: str | None = "max"
 
     @staticmethod
     def _looks_like_missing_paddle_core(exc: Exception) -> bool:
@@ -91,24 +97,69 @@ class PaddleOCRProvider:
 
     def _get_ocr(self):
         """Lazy load PaddleOCR instance."""
-        if self._ocr_instance is None:
+        cls = type(self)
+        cache_key = (
+            self.use_angle_cls,
+            self.lang,
+            self.show_log,
+            self.enable_mkldnn,
+            self.text_detection_model_name,
+            self.text_recognition_model_name,
+            self.cpu_threads,
+        )
+        if cache_key not in cls._ocr_cache:
             try:
+                if not self.enable_mkldnn and "FLAGS_use_mkldnn" not in os.environ:
+                    # Paddle 3.x CPU + oneDNN has known runtime regressions on some setups.
+                    os.environ["FLAGS_use_mkldnn"] = "0"
                 from paddleocr import PaddleOCR
                 sig = inspect.signature(PaddleOCR)
                 kwargs = {}
-                if "lang" in sig.parameters:
+                has_custom_models = bool(self.text_detection_model_name or self.text_recognition_model_name)
+                if (not has_custom_models) and "lang" in sig.parameters:
                     kwargs["lang"] = self.lang
                 if "show_log" in sig.parameters:
                     kwargs["show_log"] = self.show_log
                 if "device" in sig.parameters:
                     kwargs["device"] = "cpu"
+                if "use_doc_orientation_classify" in sig.parameters:
+                    kwargs["use_doc_orientation_classify"] = False
+                if "use_doc_unwarping" in sig.parameters:
+                    kwargs["use_doc_unwarping"] = False
                 if "use_textline_orientation" in sig.parameters:
                     kwargs["use_textline_orientation"] = self.use_angle_cls
                 elif "use_angle_cls" in sig.parameters:
                     kwargs["use_angle_cls"] = self.use_angle_cls
                 if "use_gpu" in sig.parameters:
                     kwargs["use_gpu"] = False
-                self._ocr_instance = PaddleOCR(**kwargs)
+                if self.text_detection_model_name and "text_detection_model_name" in sig.parameters:
+                    kwargs["text_detection_model_name"] = self.text_detection_model_name
+                if self.text_recognition_model_name and "text_recognition_model_name" in sig.parameters:
+                    kwargs["text_recognition_model_name"] = self.text_recognition_model_name
+                if isinstance(self.cpu_threads, int) and self.cpu_threads > 0:
+                    if "cpu_threads" in sig.parameters:
+                        kwargs["cpu_threads"] = self.cpu_threads
+                    else:
+                        # Some versions accept this via **kwargs only.
+                        kwargs["cpu_threads"] = self.cpu_threads
+                speculative_enable_mkldnn = False
+                if "enable_mkldnn" in sig.parameters:
+                    kwargs["enable_mkldnn"] = self.enable_mkldnn
+                elif "use_mkldnn" in sig.parameters:
+                    kwargs["use_mkldnn"] = self.enable_mkldnn
+                else:
+                    # PaddleOCR 3.x may accept this through **kwargs even if not in signature.
+                    kwargs["enable_mkldnn"] = self.enable_mkldnn
+                    speculative_enable_mkldnn = True
+                try:
+                    cls._ocr_cache[cache_key] = PaddleOCR(**kwargs)
+                except Exception as inner_exc:
+                    msg = str(inner_exc)
+                    if speculative_enable_mkldnn and "Unknown argument: enable_mkldnn" in msg:
+                        kwargs.pop("enable_mkldnn", None)
+                        cls._ocr_cache[cache_key] = PaddleOCR(**kwargs)
+                    else:
+                        raise
             except ImportError as exc:
                 if "no module named 'paddle'" in str(exc).lower():
                     raise RuntimeError(
@@ -127,7 +178,7 @@ class PaddleOCRProvider:
                         "(recommended Python 3.10/3.11)."
                     ) from exc
                 raise
-        return self._ocr_instance
+        return cls._ocr_cache[cache_key]
 
     def extract_text(self, image_path: str) -> str:
         """Extract text from image using PaddleOCR."""
@@ -136,28 +187,62 @@ class PaddleOCRProvider:
 
         try:
             ocr = self._get_ocr()
-            result = ocr.ocr(image_path, cls=self.use_angle_cls)
+            # PaddleOCR 3.x prefers predict(); ocr() is retained for backward compatibility.
+            if hasattr(ocr, "predict"):
+                predict_kwargs = {}
+                if isinstance(self.text_det_limit_side_len, int) and self.text_det_limit_side_len > 0:
+                    try:
+                        predict_sig = inspect.signature(ocr.predict)
+                        if "text_det_limit_side_len" in predict_sig.parameters:
+                            predict_kwargs["text_det_limit_side_len"] = self.text_det_limit_side_len
+                        if (
+                            self.text_det_limit_type
+                            and isinstance(self.text_det_limit_type, str)
+                            and "text_det_limit_type" in predict_sig.parameters
+                        ):
+                            predict_kwargs["text_det_limit_type"] = self.text_det_limit_type
+                    except Exception:
+                        pass
+                result = ocr.predict(image_path, **predict_kwargs)
+            else:
+                result = ocr.ocr(image_path, cls=self.use_angle_cls)
             if not result:
                 return ""
 
             # Extract text from OCR result (compatible with multiple PaddleOCR result formats).
             lines = []
-            if isinstance(result, list) and result and isinstance(result[0], list):
-                for line in result[0]:
-                    if line and len(line) >= 2:
-                        text_obj = line[1]
-                        text = text_obj[0] if isinstance(text_obj, (tuple, list)) else str(text_obj)
-                        if text:
-                            lines.append(text.strip())
-            elif isinstance(result, list):
+            if isinstance(result, list):
                 for item in result:
                     if isinstance(item, dict):
+                        rec_texts = item.get("rec_texts")
+                        if isinstance(rec_texts, (list, tuple)):
+                            for text in rec_texts:
+                                if isinstance(text, str) and text.strip():
+                                    lines.append(text.strip())
                         text = item.get("rec_text") or item.get("text") or ""
                         if isinstance(text, str) and text.strip():
                             lines.append(text.strip())
+                    elif isinstance(item, list):
+                        for line in item:
+                            if line and len(line) >= 2:
+                                text_obj = line[1]
+                                text = (
+                                    text_obj[0]
+                                    if isinstance(text_obj, (tuple, list)) and text_obj
+                                    else str(text_obj)
+                                )
+                                if text:
+                                    lines.append(text.strip())
 
             return "\n".join(lines).strip()
-        except Exception:
+        except Exception as exc:
+            msg = str(exc)
+            if "ConvertPirAttribute2RuntimeAttribute" in msg:
+                print(
+                    "[OCR] Paddle CPU/oneDNN runtime issue detected. "
+                    "Recommend: disable MKLDNN or install paddlepaddle==3.2.2."
+                )
+            print(f"[OCR] PaddleOCR failed on {os.path.basename(image_path)}: {exc}")
             return ""
 
 
