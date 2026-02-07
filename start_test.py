@@ -126,6 +126,28 @@ def main():
         if ocr_reader is None or not image_paths:
             return None
 
+        def load_image_for_ocr(img_path):
+            """兼容中文路径读取图片，避免 cv2.imread 在 Windows 下失败"""
+            try:
+                import cv2
+                import numpy as np
+            except Exception:
+                return img_path
+
+            has_non_ascii = any(ord(ch) > 127 for ch in img_path)
+            if not has_non_ascii:
+                image = cv2.imread(img_path)
+                if image is not None:
+                    return image
+
+            try:
+                file_bytes = np.fromfile(img_path, dtype=np.uint8)
+                if file_bytes.size == 0:
+                    return None
+                return cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            except Exception:
+                return None
+
         # 从题目中提取引号内的关键词（如 "红袖"）
         import re
         target = None
@@ -143,7 +165,12 @@ def main():
         total_count = 0
         for img_path in image_paths:
             try:
-                results = ocr_reader.readtext(img_path)
+                image_input = load_image_for_ocr(img_path)
+                if image_input is None:
+                    print(f"[OCR] 图片读取失败（可能是路径编码问题）: {img_path}")
+                    continue
+
+                results = ocr_reader.readtext(image_input)
                 texts = [text for _, text, conf in results if conf > 0.3]
                 count = sum(1 for txt in texts if target in txt)
                 total_count += count
