@@ -1,0 +1,25 @@
+{
+  "target_friend": "小蔡",
+  "groups": [
+    "测试群"
+  ],
+  "keywords": [
+    "小杜"
+  ],
+  "exclude_keywords": [],
+  "poll_interval_sec": 1.0,
+  "dedupe_ttl_sec": 600,
+  "case_sensitive": false,
+  "use_regex": false,
+  "send_delay_sec": 0.15,
+  "max_send_per_cycle": 100,
+  "message_template": "群聊：{group}\n原文内容：{message}\n发送人：{sender}\n消息时间：{send_time}",
+  "is_maximize": false,
+  "close_weixin_on_exit": false,
+  "use_window_listener": true,
+  "window_minimize": false,
+  "window_tail_scan_count": 120,
+  "listener_window_offset_x": -500,
+  "use_direct_poll": true,
+  "pull_count": 5
+}

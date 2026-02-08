@@ -1,0 +1,31 @@
+{
+  "target_friend": "文件传输助手",
+  "groups": [
+    "群A",
+    "群B"
+  ],
+  "keywords": [
+    "告警",
+    "报错",
+    "紧急"
+  ],
+  "exclude_keywords": [
+    "忽略",
+    "测试"
+  ],
+  "poll_interval_sec": 1.0,
+  "dedupe_ttl_sec": 600,
+  "case_sensitive": false,
+  "use_regex": false,
+  "send_delay_sec": 0.15,
+  "max_send_per_cycle": 10,
+  "message_template": "原文内容：{message}\n发送人：{sender}\n消息时间：{send_time}",
+  "is_maximize": false,
+  "close_weixin_on_exit": false,
+  "use_window_listener": true,
+  "window_minimize": false,
+  "window_tail_scan_count": 120,
+  "listener_window_offset_x": -260,
+  "use_direct_poll": true,
+  "pull_count": 5
+}
