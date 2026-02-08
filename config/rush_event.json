@@ -15,7 +15,7 @@
   ],
   "ai_enabled": true,
   "ai_timeout_ms": 1200,
-  "confidence_threshold": 0.0,
+  "confidence_threshold": 0.5,
   "comment_once": true,
   "state_file": "rush_state.json",
   "output_dir": "rush_moments_cache",

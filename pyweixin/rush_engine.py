@@ -75,6 +75,26 @@ def _file_sha1(path: str) -> str:
         return ""
 
 
+_OCR_TEXT_CACHE_MAX = 256
+_OCR_TEXT_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def _build_ocr_cache_key(path: str) -> tuple[str, int, int] | None:
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return (os.path.abspath(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _cache_ocr_text(key: tuple[str, int, int], text: str) -> None:
+    if len(_OCR_TEXT_CACHE) >= _OCR_TEXT_CACHE_MAX:
+        _OCR_TEXT_CACHE.pop(next(iter(_OCR_TEXT_CACHE)))
+    _OCR_TEXT_CACHE[key] = text
+
+
 def build_post_fingerprint(content: str, publish_time: str, image_paths: list[str]) -> str:
     """Build deterministic fingerprint from post content and first image hash."""
     hasher = hashlib.sha1()
@@ -143,12 +163,21 @@ def _collect_ocr_text(image_paths: list[str], ocr_provider: OCRProvider | None) 
         return ""
     chunks: list[str] = []
     for path in image_paths:
-        try:
-            text = ocr_provider.extract_text(path)
-            if text:
-                chunks.append(text.strip())
-        except Exception:
+        key = _build_ocr_cache_key(path)
+        if key and key in _OCR_TEXT_CACHE:
+            cached = _OCR_TEXT_CACHE[key]
+            if cached:
+                chunks.append(cached)
             continue
+        text = ""
+        try:
+            text = (ocr_provider.extract_text(path) or "").strip()
+        except Exception:
+            text = ""
+        if key:
+            _cache_ocr_text(key, text)
+        if text:
+            chunks.append(text)
     return "\n".join(chunks).strip()
 
 
@@ -209,24 +238,35 @@ def resolve_answer(
     ai_provider: AIAnswerProvider | None = None,
     ai_enabled: bool = True,
     ai_timeout_ms: int = 1200,
-    confidence_threshold: float = 0.0,
+    confidence_threshold: float = 0.5,
     default_answer: str | None = None,
 ) -> AnswerResult | None:
-    """Resolve answer via template first, AI fallback."""
+    """Resolve answer via template first, OCR-assisted template next, then AI."""
     start = time.perf_counter()
-    ocr_text = _collect_ocr_text(image_paths, ocr_provider)
-    question_text = "\n".join(
+    base_question_text = "\n".join(
         part.strip()
-        for part in (post_content or "", detail_text or "", ocr_text or "")
+        for part in (post_content or "", detail_text or "")
         if part and part.strip()
     ).strip()
-    if not question_text:
-        question_text = (post_content or "").strip()
+    question_text = base_question_text or (post_content or "").strip()
 
     result = parse_answer_from_templates(question_text, templates)
     if result:
         result.latency_ms = int((time.perf_counter() - start) * 1000)
         return result
+
+    if image_paths and ocr_provider:
+        ocr_text = _collect_ocr_text(image_paths, ocr_provider)
+        if ocr_text:
+            question_text = "\n".join(
+                part.strip()
+                for part in (question_text, ocr_text)
+                if part and part.strip()
+            ).strip()
+            result = parse_answer_from_templates(question_text, templates)
+            if result:
+                result.latency_ms = int((time.perf_counter() - start) * 1000)
+                return result
 
     if ai_enabled and ai_provider:
         try:

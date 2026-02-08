@@ -80,7 +80,7 @@ class RushConfig:
     templates: list[QuestionTemplate] = field(default_factory=list)
     ai_enabled: bool = True
     ai_timeout_ms: int = 1200
-    confidence_threshold: float = 0.0
+    confidence_threshold: float = 0.5
     comment_once: bool = True
     state_file: str = "rush_state.json"
     output_dir: str = "rush_moments_cache"
@@ -103,7 +103,7 @@ class RushConfig:
             templates=templates,
             ai_enabled=bool(data.get("ai_enabled", True)),
             ai_timeout_ms=int(data.get("ai_timeout_ms", 1200)),
-            confidence_threshold=float(data.get("confidence_threshold", 0.0)),
+            confidence_threshold=float(data.get("confidence_threshold", 0.5)),
             comment_once=bool(data.get("comment_once", True)),
             state_file=str(data.get("state_file", "rush_state.json")),
             output_dir=str(data.get("output_dir", "rush_moments_cache")),

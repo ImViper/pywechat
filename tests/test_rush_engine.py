@@ -129,3 +129,117 @@ def test_siliconflow_payload_build_with_image(tmp_path):
     assert user_content[0]["type"] == "text"
     assert user_content[1]["type"] == "image_url"
     assert user_content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_resolve_answer_template_hit_skips_ocr_and_ai(tmp_path):
+    image = tmp_path / "sample.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    templates = [
+        QuestionTemplate(
+            name="fast-hit",
+            trigger_patterns=[r"count"],
+            answer_patterns=[r"(?P<value>\d+) apples"],
+            answer_format="{value} apples",
+            priority=1,
+        )
+    ]
+
+    class CountingOCR:
+        def __init__(self):
+            self.calls = 0
+
+        def extract_text(self, image_path):
+            _ = image_path
+            self.calls += 1
+            return "ocr text"
+
+    class CountingAI:
+        def __init__(self):
+            self.calls = 0
+
+        def answer_from_text_and_images(self, question_text, image_paths, templates_hint=None):
+            _ = (question_text, image_paths, templates_hint)
+            self.calls += 1
+            return AnswerResult(answer="bad", confidence=1.0, source="ai:test")
+
+    ocr = CountingOCR()
+    ai = CountingAI()
+    result = resolve_answer(
+        post_content="question: count 4 apples",
+        detail_text="",
+        image_paths=[str(image)],
+        templates=templates,
+        ocr_provider=ocr,
+        ai_provider=ai,
+        ai_enabled=True,
+        ai_timeout_ms=500,
+    )
+    assert result is not None
+    assert result.answer == "4 apples"
+    assert result.source == "template:fast-hit"
+    assert ocr.calls == 0
+    assert ai.calls == 0
+
+
+def test_resolve_answer_ocr_cache_reuse(tmp_path):
+    image = tmp_path / "sample.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    templates = [
+        QuestionTemplate(
+            name="ocr-hit",
+            trigger_patterns=[r"年华"],
+            answer_patterns=[r"(?P<value>\d+)年华"],
+            answer_format="{value}年华",
+            priority=1,
+        )
+    ]
+
+    class CountingOCR:
+        def __init__(self):
+            self.calls = 0
+
+        def extract_text(self, image_path):
+            _ = image_path
+            self.calls += 1
+            return "4年华"
+
+    ocr = CountingOCR()
+    first = resolve_answer(
+        post_content="这是题目",
+        detail_text="",
+        image_paths=[str(image)],
+        templates=templates,
+        ocr_provider=ocr,
+        ai_enabled=False,
+    )
+    second = resolve_answer(
+        post_content="这是题目",
+        detail_text="",
+        image_paths=[str(image)],
+        templates=templates,
+        ocr_provider=ocr,
+        ai_enabled=False,
+    )
+    assert first is not None
+    assert second is not None
+    assert first.answer == "4年华"
+    assert second.answer == "4年华"
+    assert ocr.calls == 1
+
+
+def test_resolve_answer_default_confidence_threshold_blocks_low_confidence_ai():
+    result = resolve_answer(
+        post_content="no template",
+        detail_text="",
+        image_paths=[],
+        templates=[],
+        ai_provider=DummyAI("7年华"),
+        ai_enabled=True,
+        ai_timeout_ms=500,
+    )
+    assert result is None
+
+
+def test_rush_config_default_confidence_threshold():
+    cfg = RushConfig.from_mapping({"event_id": "evt-2", "target_friend_remark": "x"})
+    assert cfg.confidence_threshold == 0.5

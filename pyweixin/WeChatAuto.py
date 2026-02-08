@@ -2143,8 +2143,27 @@ class Moments():
         return False
 
     @staticmethod
+    def _wait_comment_editor_state(moments_window,opened:bool,timeout:float=1.0,poll:float=0.08)->bool:
+        """Wait until comment editor appears/disappears."""
+        deadline=time.time()+max(timeout,0.0)
+        while True:
+            exists=False
+            try:
+                comment_edit=moments_window.child_window(**Edits.SnsCommentEdit)
+                exists=comment_edit.exists(timeout=0.05)
+            except Exception:
+                exists=False
+            if exists==opened:
+                return True
+            if time.time()>=deadline:
+                return False
+            time.sleep(max(poll,0.02))
+
+    @staticmethod
     def _open_comment_editor(moments_window,content_item,use_offset_fix:bool=False,pre_move_coords:tuple=None)->bool:
-        """点击省略号并打开评论输入框。"""
+        """Click ellipsis and open comment input."""
+        if Moments._wait_comment_editor_state(moments_window,opened=True,timeout=0.2,poll=0.05):
+            return True
         comment_button=moments_window.child_window(**Buttons.CommentButton)
         for _ in range(_SNS_CLICK_RETRY):
             if pre_move_coords is not None:
@@ -2156,62 +2175,87 @@ class Moments():
                 x_offset+=(rect.left-win_rect.left)
             ellipsis_area=(rect.right-x_offset,rect.bottom-_SNS_ELLIPSIS_Y_OFFSET)
             mouse.click(coords=ellipsis_area)
-            time.sleep(0.15)
-            if comment_button.exists(timeout=0.2):
-                comment_button.click_input()
-                time.sleep(0.15)
-                return True
+            time.sleep(0.2)
+            if comment_button.exists(timeout=0.6):
+                try:
+                    comment_button.click_input()
+                except Exception:
+                    pass
+                if Moments._wait_comment_editor_state(moments_window,opened=True,timeout=0.8,poll=0.08):
+                    return True
             pyautogui.press('esc')
-            time.sleep(0.05)
+            time.sleep(0.1)
         return False
 
     @staticmethod
     def _paste_and_send_comment(moments_window,text:str,anchor_mode:str='list',anchor_source=None,clear_first:bool=True)->bool:
-        """粘贴评论文本并发送。"""
+        """Paste text and verify send success by editor close state."""
+        if not Moments._wait_comment_editor_state(moments_window,opened=True,timeout=0.6,poll=0.08):
+            return False
         if clear_first:
             pyautogui.hotkey('ctrl','a')
             pyautogui.press('backspace')
         SystemSettings.copy_text_to_windowsclipboard(text=text)
         pyautogui.hotkey('ctrl','v')
-        time.sleep(0.05)
+        time.sleep(0.1)
+        clicked_by_anchor=False
         if anchor_source is not None:
-            cr=anchor_source.rectangle()
-            if anchor_mode=='list':
-                Moments._click_send_button(cr,x_offset=_SNS_SEND_LIST_X_OFFSET,y_offset=_SNS_SEND_LIST_Y_OFFSET)
-            else:
-                Moments._click_send_button(cr,x_offset=_SNS_SEND_DETAIL_X_OFFSET,y_offset=_SNS_SEND_DETAIL_Y_OFFSET)
+            try:
+                cr=anchor_source.rectangle()
+                if anchor_mode=='list':
+                    Moments._click_send_button(cr,x_offset=_SNS_SEND_LIST_X_OFFSET,y_offset=_SNS_SEND_LIST_Y_OFFSET)
+                else:
+                    Moments._click_send_button(cr,x_offset=_SNS_SEND_DETAIL_X_OFFSET,y_offset=_SNS_SEND_DETAIL_Y_OFFSET)
+                clicked_by_anchor=True
+            except Exception:
+                clicked_by_anchor=False
+        if not clicked_by_anchor:
+            pyautogui.press('enter')
+        if Moments._wait_comment_editor_state(moments_window,opened=False,timeout=0.9,poll=0.08):
             return True
-        pyautogui.press('enter')
-        return True
+        if clicked_by_anchor:
+            pyautogui.press('enter')
+            if Moments._wait_comment_editor_state(moments_window,opened=False,timeout=0.7,poll=0.08):
+                return True
+        return False
 
     @staticmethod
     def _comment_flow(moments_window,content_item,comments,anchor_mode:str='list',
                       anchor_source=None,use_offset_fix:bool=False,
                       pre_move_coords:tuple=None,clear_first:bool=True,
-                      callback:Callable[[str],str]=None):
-        """统一评论流程：打开输入框 -> 粘贴 -> 发送。"""
+                      callback:Callable[[str],str]=None)->bool:
+        """Unified comment flow: open editor -> paste -> send."""
         if isinstance(comments,str):
             comments=[comments]
+        sent_any=False
         for idx,text in enumerate(comments):
             text=str(text).strip()
             if not text:
                 continue
             if callback is not None:
                 text=callback(text)
+                text=str(text).strip() if text is not None else ''
+            if not text:
+                continue
             opened=Moments._open_comment_editor(
                 moments_window,content_item,
                 use_offset_fix=use_offset_fix,
                 pre_move_coords=pre_move_coords)
             if not opened:
-                print(f"[评论] 第{idx+1}条打开编辑框失败，跳过")
+                print(f'[comment] failed to open editor for comment #{idx+1}, skip')
                 continue
-            Moments._paste_and_send_comment(
+            posted=Moments._paste_and_send_comment(
                 moments_window,text,
                 anchor_mode=anchor_mode,
                 anchor_source=anchor_source,
                 clear_first=clear_first)
+            if posted:
+                sent_any=True
+            else:
+                print(f'[comment] failed to send comment #{idx+1}')
             if idx<len(comments)-1:
                 time.sleep(0.5)
+        return sent_any
 
     @staticmethod
     def dump_recent_moments(recent:Literal['Today','Yesterday','Week','Month']='Today',number:int=None,is_maximize:bool=None,close_weixin:bool=None)->list[dict]:
@@ -2814,12 +2858,14 @@ class Moments():
             if comment_cell is None and len(detail_items)>1:
                 comment_cell=detail_items[-1]
 
-            Moments._comment_flow(
+            posted=Moments._comment_flow(
                 moments_window,detail_item,answer_list,
                 anchor_mode='detail',anchor_source=comment_cell,
                 use_offset_fix=True,clear_first=False
             )
-            result['comment_posted']=True
+            result['comment_posted']=posted
+            if not posted and not result.get('error'):
+                result['error']='comment flow finished but send was not verified'
             return result
 
         except Exception as e:
@@ -2861,6 +2907,31 @@ class Moments():
             if last_error is not None:
                 raise last_error
             raise RuntimeError(error_hint)
+
+        def resolve_feed_comment_anchor(moments_list,selected_item):
+            """Locate a stable comment anchor near current content item."""
+            try:
+                items=moments_list.children(control_type='ListItem')
+            except Exception:
+                return None
+            selected_idx=-1
+            for idx,item in enumerate(items):
+                if item==selected_item:
+                    selected_idx=idx
+                    break
+            if selected_idx>=0:
+                for offset in range(1,5):
+                    idx=selected_idx+offset
+                    if idx>=len(items):
+                        break
+                    candidate=items[idx]
+                    try:
+                        cls_name=candidate.class_name()
+                    except Exception:
+                        cls_name=""
+                    if "TimelineCommentCell" in cls_name:
+                        return candidate
+            return Tools.get_next_item(moments_list,selected_item)
 
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
@@ -3046,17 +3117,15 @@ class Moments():
             if not answer_list:
                 return result
 
-            comment_listitem=Tools.get_next_item(moments_list,selected_item)
-            if comment_listitem is None:
-                result['error']='cannot locate comment anchor in feed list'
-                return result
-
-            Moments._comment_flow(
+            comment_listitem=resolve_feed_comment_anchor(moments_list,selected_item)
+            posted=Moments._comment_flow(
                 moments_window,selected_item,answer_list,
                 anchor_mode='list',anchor_source=comment_listitem,
                 use_offset_fix=False,clear_first=False
             )
-            result['comment_posted']=True
+            result['comment_posted']=posted
+            if not posted and not result.get('error'):
+                result['error']='comment flow finished but send was not verified'
             return result
 
         except Exception as e:
