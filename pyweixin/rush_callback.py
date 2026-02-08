@@ -322,6 +322,7 @@ def create_streaming_callback(
     ai_provider: Any = None,
     verbose: bool = True,
     known_keywords: list[str] | None = None,
+    answer_suffix: str | None = None,
 ):
     """
     Create a streaming callback: answers are pushed to a queue as they arrive.
@@ -342,6 +343,10 @@ def create_streaming_callback(
         seen: set[str] = set()
 
         def push(answer: str, source: str, elapsed: int):
+            if answer_suffix:
+                m = re.match(r'^(\d+)', answer)
+                if m:
+                    answer = f"{m.group(1)}{answer_suffix}"
             if answer and answer not in seen:
                 seen.add(answer)
                 if verbose:

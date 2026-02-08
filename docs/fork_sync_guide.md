@@ -3,7 +3,7 @@
 ## 1. 目标
 
 1. `main` 始终保持与 `upstream/main` 同步。
-2. 你的改动都放在 `viper/*` 分支（例如 `viper/moments-custom`）。
+2. 你的改动都放在 `viper/*` 分支（例如 `viper/moments-custom-v2`）。
 3. 需要上游新代码时，从 `main` 同步到你的开发分支。
 
 ---
@@ -28,21 +28,21 @@ git pull --ff-only upstream main
 ### 3.2 把 main 新改动带到开发分支
 
 ```bash
-git switch viper/moments-custom
+git switch viper/moments-custom-v2
 git rebase main
 ```
 
 不想改写提交历史可改用：
 
 ```bash
-git switch viper/moments-custom
+git switch viper/moments-custom-v2
 git merge main
 ```
 
 ### 3.3 推送开发分支
 
 ```bash
-git push -u origin viper/moments-custom
+git push -u origin viper/moments-custom-v2
 ```
 
 ---

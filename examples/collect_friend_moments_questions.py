@@ -16,7 +16,7 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from pyweixin import Moments
+from pyweixin.moments_ext import dump_friend_moments
 from pyweixin.moments_question_miner import (
     QuestionFilter,
     extract_question_snippets,
@@ -224,7 +224,7 @@ def main() -> None:
     print(f"[1/3] 开始抓取朋友圈: friend={args.friend} mode={mode_name} output={output_root}")
     try:
         detail_filter = (lambda text: match_question_post(text, flt)) if (args.save_detail and args.save_matched_only) else None
-        posts = Moments.dump_friend_moments(
+        posts = dump_friend_moments(
             friend=args.friend,
             number=fetch_number,
             save_detail=args.save_detail,

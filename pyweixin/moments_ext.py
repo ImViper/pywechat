@@ -343,7 +343,7 @@ def wait_comment_editor_state(moments_window, opened: bool, timeout: float = 1.0
 def open_comment_editor(moments_window, content_item, use_offset_fix: bool = False, pre_move_coords: tuple = None) -> bool:
     """Click ellipsis and open comment input."""
     print(f'[debug:open_editor] start, pre_move_coords={pre_move_coords}, use_offset_fix={use_offset_fix}')
-    if wait_comment_editor_state(moments_window, opened=True, timeout=0.2, poll=0.05):
+    if wait_comment_editor_state(moments_window, opened=True, timeout=0.05, poll=0.02):
         print('[debug:open_editor] editor already open')
         return True
     comment_button = moments_window.child_window(**COMMENT_BUTTON)
@@ -361,13 +361,13 @@ def open_comment_editor(moments_window, content_item, use_offset_fix: bool = Fal
         ellipsis_area = (rect.right - x_offset, rect.bottom - _SNS_ELLIPSIS_Y_OFFSET)
         print(f'[debug:open_editor] clicking ellipsis at {ellipsis_area}')
         mouse.click(coords=ellipsis_area)
-        time.sleep(0.2)
-        btn_exists = comment_button.exists(timeout=0.6)
+        time.sleep(0.08)
+        btn_exists = comment_button.exists(timeout=0.3)
         print(f'[debug:open_editor] comment_button.exists={btn_exists}')
         if btn_exists:
             try:
                 comment_button.click_input()
-                time.sleep(0.15)
+                time.sleep(0.05)
                 print('[debug:open_editor] clicked comment button, returning True')
                 return True
             except Exception as e:
@@ -381,7 +381,7 @@ def open_comment_editor(moments_window, content_item, use_offset_fix: bool = Fal
 def paste_and_send_comment(moments_window, text: str, anchor_mode: str = 'list', anchor_source=None, clear_first: bool = True) -> bool:
     """Paste text and verify send success by editor close state."""
     print(f'[debug:paste_send] start, text={text!r}, anchor_mode={anchor_mode}, clear_first={clear_first}')
-    editor_detected = wait_comment_editor_state(moments_window, opened=True, timeout=0.6, poll=0.08)
+    editor_detected = wait_comment_editor_state(moments_window, opened=True, timeout=0.2, poll=0.05)
     if not editor_detected:
         print('[debug:paste_send] editor element not detected, but proceeding anyway (editor may be open)')
     if clear_first:
@@ -389,7 +389,7 @@ def paste_and_send_comment(moments_window, text: str, anchor_mode: str = 'list',
         pyautogui.press('backspace')
     SystemSettings.copy_text_to_windowsclipboard(text=text)
     pyautogui.hotkey('ctrl', 'v')
-    time.sleep(0.1)
+    time.sleep(0.03)
     print('[debug:paste_send] pasted text')
     clicked_by_anchor = False
     if anchor_source is not None:
@@ -408,13 +408,13 @@ def paste_and_send_comment(moments_window, text: str, anchor_mode: str = 'list',
     if not clicked_by_anchor:
         pyautogui.press('enter')
         print('[debug:paste_send] pressed enter to send')
-    closed = wait_comment_editor_state(moments_window, opened=False, timeout=0.9, poll=0.08)
+    closed = wait_comment_editor_state(moments_window, opened=False, timeout=0.4, poll=0.05)
     print(f'[debug:paste_send] editor closed after send={closed}')
     if closed:
         return True
     if clicked_by_anchor:
         pyautogui.press('enter')
-        closed2 = wait_comment_editor_state(moments_window, opened=False, timeout=0.7, poll=0.08)
+        closed2 = wait_comment_editor_state(moments_window, opened=False, timeout=0.3, poll=0.05)
         print(f'[debug:paste_send] fallback enter, editor closed={closed2}')
         if closed2:
             return True
@@ -1474,12 +1474,12 @@ def fetch_and_comment_from_moments_feed(
                 for open_pos in open_candidates:
                     try:
                         mouse.click(coords=open_pos)
-                        time.sleep(0.2)
+                        time.sleep(0.08)
                         mouse.right_click(coords=viewer_right_click_pos)
                         copy_menu = moments_window.child_window(**MenuItems.CopyMenuItem)
-                        if copy_menu.exists(timeout=0.3):
+                        if copy_menu.exists(timeout=0.15):
                             copy_menu.click_input()
-                            time.sleep(0.5)
+                            time.sleep(0.15)
                             first_img_path = os.path.join(run_folder, '0.png')
                             SystemSettings.save_pasted_image(first_img_path)
                             if os.path.isfile(first_img_path):
@@ -1490,9 +1490,9 @@ def fetch_and_comment_from_moments_feed(
                                     time.sleep(0.1)
                                     mouse.right_click(coords=viewer_right_click_pos)
                                     copy_menu = moments_window.child_window(**MenuItems.CopyMenuItem)
-                                    if copy_menu.exists(timeout=0.3):
+                                    if copy_menu.exists(timeout=0.15):
                                         copy_menu.click_input()
-                                        time.sleep(0.4)
+                                        time.sleep(0.15)
                                         img_path = os.path.join(run_folder, f'{i}.png')
                                         SystemSettings.save_pasted_image(img_path)
                                         if os.path.isfile(img_path):
@@ -1500,7 +1500,7 @@ def fetch_and_comment_from_moments_feed(
                                 break
                     finally:
                         pyautogui.press('esc')
-                        time.sleep(0.1)
+                        time.sleep(0.05)
                 if (not opened) and image_count > 0:
                     result['error'] = 'list mode cannot extract images, skipped'
                     result['success'] = True
@@ -1550,11 +1550,15 @@ def fetch_and_comment_from_moments_feed(
                 cls = candidates[0].class_name()
                 print(f'[debug:reacquire] nav #{nav_i + 1} focused class={cls}')
                 if 'TimelineCommentCell' not in cls and 'TimelineCell' not in cls and 'AdGridImage' not in cls:
-                    selected_item = candidates[0]
                     try:
-                        item_text = selected_item.window_text()[:80]
+                        item_text = candidates[0].window_text()[:80]
                     except Exception:
                         item_text = '(cannot read)'
+                    # 验证作者匹配，防止评论到错误的帖子
+                    if target_author and not item_text.startswith(target_author):
+                        print(f'[debug:reacquire] skipped (author mismatch): {item_text}')
+                        continue
+                    selected_item = candidates[0]
                     print(f'[debug:reacquire] found valid item: {item_text}')
                     break
             else:
@@ -1576,6 +1580,19 @@ def fetch_and_comment_from_moments_feed(
             posted_any = False
             all_answers = []
             comment_count = 0
+            # 预开编辑器：在等待 AI/OCR 答案期间先点开评论输入框
+            editor_preloaded = False
+            try:
+                editor_preloaded = open_comment_editor(
+                    moments_window, selected_item,
+                    use_offset_fix=False, pre_move_coords=center_point
+                )
+                if editor_preloaded:
+                    print('[debug:stream] editor pre-opened while waiting for answers')
+                else:
+                    print('[debug:stream] editor pre-open failed, will retry per comment')
+            except Exception as e:
+                print(f'[debug:stream] editor pre-open error: {e}')
             while True:
                 try:
                     answer = answer_queue.get(timeout=15)
@@ -1591,17 +1608,25 @@ def fetch_and_comment_from_moments_feed(
                 all_answers.append(answer)
                 comment_count += 1
                 print(f'[debug:stream] posting comment #{comment_count}: {answer!r}')
-                if comment_count > 1:
-                    try:
-                        comment_listitem = resolve_feed_comment_anchor(moments_list, selected_item)
-                    except Exception:
-                        pass
-                posted = comment_flow(
-                    moments_window, selected_item, [answer],
-                    anchor_mode='list', anchor_source=comment_listitem,
-                    use_offset_fix=False, clear_first=False,
-                    pre_move_coords=center_point
-                )
+                if comment_count == 1 and editor_preloaded:
+                    # 编辑器已预开，直接粘贴发送
+                    posted = paste_and_send_comment(
+                        moments_window, answer,
+                        anchor_mode='list', anchor_source=comment_listitem,
+                        clear_first=False
+                    )
+                else:
+                    if comment_count > 1:
+                        try:
+                            comment_listitem = resolve_feed_comment_anchor(moments_list, selected_item)
+                        except Exception:
+                            pass
+                    posted = comment_flow(
+                        moments_window, selected_item, [answer],
+                        anchor_mode='list', anchor_source=comment_listitem,
+                        use_offset_fix=False, clear_first=False,
+                        pre_move_coords=center_point
+                    )
                 if posted:
                     posted_any = True
                     print(f'[debug:stream] comment #{comment_count} posted OK')

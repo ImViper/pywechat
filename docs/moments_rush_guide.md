@@ -53,7 +53,7 @@ $env:PYWEIXIN_OCR_LIMIT_TYPE='max'
 唯一推荐入口：`examples/run_feed_refresh_listener.py`
 
 ```powershell
-python examples/run_feed_refresh_listener.py <发布时间HH:MM> <目标作者> [轮询秒数]
+python examples/run_feed_refresh_listener.py <发布时间HH:MM> <目标作者> [轮询秒数] [--suffix 性别]
 ```
 
 示例：
@@ -61,6 +61,7 @@ python examples/run_feed_refresh_listener.py <发布时间HH:MM> <目标作者> 
 ```powershell
 python examples/run_feed_refresh_listener.py 19:15 小蔡
 python examples/run_feed_refresh_listener.py 19:15 小蔡 0.5
+python examples/run_feed_refresh_listener.py 19:15 小蔡 0.5 --suffix 男
 ```
 
 参数说明：
@@ -70,6 +71,7 @@ python examples/run_feed_refresh_listener.py 19:15 小蔡 0.5
 | `发布时间` | 预计发布时间（HH:MM），脚本会在前2分钟开始监听，后5分钟结束 |
 | `目标作者` | 微信好友备注名 |
 | `轮询秒数` | 可选，默认 0.5 秒 |
+| `--suffix` | 可选，拼车模式后缀。指定后答案自动变为"数字+后缀"（如 `5楚凭阑` → `5男`） |
 
 运行产物：
 
@@ -89,9 +91,10 @@ python examples/run_feed_refresh_listener.py 19:15 小蔡 0.5
     │
     ├─ 并行启动 ─┬── OCR 关键词计数 (~1.8s)  ─→ 到达即发评论 #1
     │             ├── AI  视觉识别   (~3.1s)  ─→ 到达即发评论 #2
-    │             └── UI 重新定位帖子 (~0.5s, 被覆盖)
+    │             ├── UI 重新定位帖子 (~0.3s, 被覆盖)
+    │             └── 预打开评论编辑器 (~0.4s, 被覆盖)
     │
-    └─ 第一条评论约 2s 内发出
+    └─ 第一条评论约 2.7s 内发出（含图片提取）
 ```
 
 ### 4.2 流式消费策略（当前实现）
@@ -101,6 +104,8 @@ python examples/run_feed_refresh_listener.py 19:15 小蔡 0.5
 3. 主线程从队列消费，每收到一个答案立即发一条评论。
 4. 相同答案自动去重，不同答案各发一条。
 5. UI 重新定位（reacquire feed list）与 OCR/AI 并行执行，不额外等待。
+6. reacquire 完成后立即预打开评论编辑器，使第一条评论直接粘贴发送。
+7. reacquire 时校验作者名，确保评论到正确的帖子。
 
 ### 4.3 OCR 关键词提取
 
@@ -127,7 +132,7 @@ known_keywords = [
 | 监听入口 | `examples/run_feed_refresh_listener.py` | 主运行脚本 |
 | 流式回调 | `pyweixin/rush_callback.py` | `create_streaming_callback` 工厂 |
 | OCR/AI 提供者 | `pyweixin/rush_ai.py` | PaddleOCR + ARK Chat 封装 |
-| UI 自动化 | `pyweixin/WeChatAuto.py` | `Moments.fetch_and_comment_from_moments_feed` |
+| UI 自动化 | `pyweixin/moments_ext.py` | `fetch_and_comment_from_moments_feed` |
 
 ---
 
@@ -135,13 +140,14 @@ known_keywords = [
 
 ### 5.1 总朋友圈监听流程
 
-核心函数：`Moments.fetch_and_comment_from_moments_feed(...)`
+核心函数：`moments_ext.fetch_and_comment_from_moments_feed(...)`
 
 1. **读取与筛选**：复用已打开的朋友圈窗口，点刷新按钮，选中第一条有效内容，解析作者/正文/时间/图片数，计算指纹去重。
 2. **图像提取**：在列表页打开图片查看器，右键复制提取图片到本地缓存。
 3. **流式识别**：启动 OCR+AI 并发（`create_streaming_callback`），答案通过队列推送。
-4. **并行 UI 定位**：在 OCR/AI 运行的同时，重新获取 feed list 并定位到目标帖子。
-5. **流式评论**：从队列消费答案，每个答案立即走评论流程。
+4. **并行 UI 定位**：在 OCR/AI 运行的同时，重新获取 feed list 并定位到目标帖子（校验作者名匹配）。
+5. **预打开编辑器**：reacquire 完成后立即点开评论编辑器，等待答案到达后直接粘贴。
+6. **流式评论**：从队列消费答案，第一条评论跳过编辑器打开步骤直接粘贴发送，后续答案走完整评论流程。
 
 ### 5.2 评论点击实现
 
@@ -195,27 +201,50 @@ Copy-Item config/sns_click_offsets.example.json config/sns_click_offsets.local.j
 - **问题**：feed refresh 流程调用 `_comment_flow` 没传 `pre_move_coords`，鼠标不在帖子上方，省略号不显示。
 - **方案**：传入窗口中心坐标作为 `pre_move_coords`。
 
+### 6.7 评论 UI 交互超时缩减
+
+- **问题**：评论流程各环节等待超时偏保守（打开编辑器 0.6s、粘贴后 0.1s、关闭检测 0.9s），导致单条评论约 2.5s。
+- **方案**：全面缩减超时参数：
+  - `open_comment_editor`：编辑器等待 0.6s→0.3s，按钮点击后 0.15s→0.05s
+  - `paste_and_send_comment`：编辑器检测 0.6s→0.2s，粘贴后 0.1s→0.03s，关闭检测 0.9s→0.4s
+  - 图片提取：点击 0.2s→0.08s，菜单等待 0.3s→0.15s，复制等待 0.5s→0.15s
+- **效果**：端到端从 ~7.9s 降到 ~4.1s。
+
+### 6.8 评论编辑器预打开
+
+- **问题**：OCR/AI 返回答案后，还要走完整的"点省略号→等评论按钮→点评论→等编辑器"流程才能粘贴。
+- **方案**：reacquire 定位完帖子后，在等待 OCR/AI 答案的同时预打开评论编辑器。第一条评论跳过 `open_comment_editor`，直接进入 `paste_and_send_comment`。
+- **效果**：端到端从 ~4.1s 降到 ~2.7s。
+
+### 6.9 Reacquire 作者校验
+
+- **问题**：reacquire 遍历 feed list 时只检查 class_name，不验证作者名。如果目标帖子不在第一条，可能误评论到其他人的帖子。
+- **方案**：reacquire 循环中增加 `target_author` 匹配检查，跳过不匹配的帖子。
+- **效果**：避免评论到错误帖子。
+
+### 6.10 拼车模式（--suffix）
+
+- **问题**：散拼抢车场景要求评论"正确答案+性别"（如 `5男`），而 OCR/AI 返回的是原始答案（如 `5楚凭阑`）。
+- **方案**：`create_streaming_callback` 新增 `answer_suffix` 参数。在 `push()` 中提取答案的前导数字，拼接用户指定的后缀。CLI 通过 `--suffix` 参数传入。
+- **效果**：`5楚凭阑` 自动变为 `5男`，无需手动改答案。
+
 ---
 
 ## 7. 后续可优化方向
 
-### 7.1 评论 UI 交互提速
-
-当前每条评论约 2.5s（打开省略号 → 等 comment button 0.6s → 粘贴 → 发送 → 等编辑器关闭 0.9s）。可以缩减各等待超时，但需要平衡稳定性。
-
-### 7.2 OCR 模型预热
+### 7.1 OCR 模型预热
 
 首次 OCR 调用有模型加载开销。可以在监听启动时做一次空白图片的预热调用。
 
-### 7.3 图片提取提速
+### 7.2 图片提取提速
 
-当前图片提取通过右键复制 + 剪贴板，每张约 0.5s。可以探索直接从微信缓存目录读取图片文件。
+当前图片提取通过右键复制 + 剪贴板，每张约 0.2s。可以探索直接从微信缓存目录读取图片文件。
 
-### 7.4 SnsCommentEdit 元素适配
+### 7.3 SnsCommentEdit 元素适配
 
 当前评论编辑器检测（`class_name='mmui::XValidatorTextEdit'`）在某些微信版本不匹配。应该抓取当前版本的正确 class_name 更新 `Uielements.py`。
 
-### 7.5 AI 提供者切换
+### 7.4 AI 提供者切换
 
 当前使用 ARK（火山引擎），可以按需切换 SiliconFlow 或其他 OpenAI 兼容接口。在 `rush_ai.py` 中已有 `SiliconFlowOpenAIProvider` 实现。
 

@@ -34,20 +34,33 @@ def load_api_key() -> str:
 
 def main() -> None:
     if len(sys.argv) < 3:
-        print("Usage: python examples/run_feed_refresh_listener.py <publish_time_HH:MM> <target_author> [poll_interval_sec]")
+        print("Usage: python examples/run_feed_refresh_listener.py <publish_time_HH:MM> <target_author> [poll_interval_sec] [--suffix 男]")
         print("Example: python examples/run_feed_refresh_listener.py 19:15 小蔡")
         print("Example: python examples/run_feed_refresh_listener.py 19:15 小蔡 0.5")
+        print("Example: python examples/run_feed_refresh_listener.py 19:15 小蔡 0.5 --suffix 男  (拼车模式)")
         return
 
     publish_time_str = sys.argv[1]
     target_author = sys.argv[2]
 
+    # Parse --suffix from anywhere in argv
+    answer_suffix = None
+    filtered_argv = []
+    i = 3
+    while i < len(sys.argv):
+        if sys.argv[i] == "--suffix" and i + 1 < len(sys.argv):
+            answer_suffix = sys.argv[i + 1]
+            i += 2
+        else:
+            filtered_argv.append(sys.argv[i])
+            i += 1
+
     poll_interval = 0.5
-    if len(sys.argv) > 3:
+    if filtered_argv:
         try:
-            poll_interval = float(sys.argv[3])
+            poll_interval = float(filtered_argv[0])
         except Exception:
-            print(f"Warning: invalid poll interval '{sys.argv[3]}', fallback to 0.5s")
+            print(f"Warning: invalid poll interval '{filtered_argv[0]}', fallback to 0.5s")
             poll_interval = 0.5
     poll_interval = max(0.2, poll_interval)
 
@@ -122,6 +135,8 @@ def main() -> None:
     print(f"Monitor end:   {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Poll interval: {poll_interval:.2f}s")
     print(f"Output dir:    {output_dir}")
+    if answer_suffix:
+        print(f"Mode:          拼车模式 (suffix={answer_suffix})")
     print("=" * 60)
 
     state: dict = {}
@@ -150,10 +165,11 @@ def main() -> None:
         ai_provider=ai_provider,
         verbose=True,
         known_keywords=known_keywords,
+        answer_suffix=answer_suffix,
     )
 
 
-    from pyweixin.WeChatAuto import Moments
+    from pyweixin.moments_ext import fetch_and_comment_from_moments_feed
     from pyweixin.WeChatTools import Navigator
 
     loops = 0
@@ -206,7 +222,7 @@ def main() -> None:
                     time.sleep(poll_interval)
                     continue
 
-            result = Moments.fetch_and_comment_from_moments_feed(
+            result = fetch_and_comment_from_moments_feed(
                 target_author=target_author,
                 ai_callback=ai_callback,
                 target_folder=output_dir,
