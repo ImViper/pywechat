@@ -100,14 +100,14 @@
 
 ## 7. 群聊关键词监听并转发（pyweixin 4.1+）
 
-本仓库新增了示例脚本：`examples/run_group_keyword_forwarder.py`，用于监听多个群聊并在关键词命中后立即转发到指定联系人。
+本仓库新增示例脚本：`examples/run_group_keyword_forwarder.py`，用于监听一个或多个会话（群聊或好友）并在关键词命中后转发提醒。
 
 ### 7.1 复用的现有 API
 
-1. `Navigator.open_seperate_dialog_window(...)`：启动时一次性打开目标会话窗口。
-2. `Messages.send_messages_to_friend(...)`：批量发送通知到目标联系人。
-3. `Messages.pull_messages(...)` / `Messages.check_new_messages(...)`：作为窗口监听不可用时的后备轮询路径。
-4. 脚本保持单线程，避免微信 UI 自动化并发争用。
+1. `Navigator.open_seperate_dialog_window(...)`：打开并复用监听窗口。
+2. `Messages.send_messages_to_friend(...)`：发送命中后的提醒消息。
+3. `Messages.pull_messages(...)` / `Messages.check_new_messages(...)`：窗口监听不可用时的后备轮询。
+4. 脚本保持单线程执行，避免 UI 自动化并发冲突。
 
 ### 7.2 配置文件
 
@@ -120,50 +120,65 @@ Copy-Item config/group_keyword_forwarder.example.json config/group_keyword_forwa
 核心字段说明：
 
 1. `target_friend`：提醒接收人（例如“文件传输助手”）。
-2. `groups`：监控群聊白名单（按会话名称匹配）。
+2. `groups`：监控会话白名单（按会话名称匹配）。
 3. `keywords`：关键词列表（按顺序匹配，命中即转发）。
 4. `exclude_keywords`：排除词列表（命中则跳过）。
 5. `poll_interval_sec`：轮询间隔秒数。
-6. `dedupe_ttl_sec`：去重缓存有效期秒数。
+6. `dedupe_ttl_sec`：后备轮询模式的去重 TTL 秒数。
 7. `case_sensitive`：是否大小写敏感。
 8. `use_regex`：是否按正则匹配关键词与排除词。
-9. `send_delay_sec`：发送多条通知时的单条间隔。
+9. `send_delay_sec`：发送多条提醒时的单条间隔。
 10. `max_send_per_cycle`：单轮最多发送条数。
-11. `message_template`：提醒文本模板，支持 `{group}` `{keyword}` `{time}` `{message}` `{sender}` `{send_time}`。
-12. `use_window_listener`：是否启用“已打开会话窗口增量监听”模式（推荐 `true`）。
-13. `window_minimize`：是否将监听窗口最小化。
-14. `window_tail_scan_count`：每轮在窗口尾部扫描的 `ListItem` 数量（默认 80，建议 80~200）。
-15. `use_direct_poll`：窗口监听不可用时，是否直接轮询目标会话。
-16. `pull_count`：后备轮询时每轮拉取的最新消息条数（默认 5）。
+11. `message_template`：提醒模板，支持 `{group}` `{keyword}` `{time}` `{message}` `{sender}` `{send_time}`。
+12. `use_window_listener`：是否启用窗口增量监听模式（推荐 `true`）。
+13. `window_minimize`：监听窗口是否最小化。
+14. `window_tail_scan_count`：每轮扫描窗口尾部 `ListItem` 数量（默认 80，建议 80~200）。
+15. `listener_window_offset_x`：监听窗口横向偏移像素，负数向左，正数向右。
+16. `use_direct_poll`：窗口监听不可用时是否启用后备轮询。
+17. `pull_count`：后备轮询每轮拉取的消息条数。
 
 ### 7.3 运行方式
 
-主命令：
+默认命令（使用 `config/group_keyword_forwarder.json`）：
+
+```powershell
+python examples/run_group_keyword_forwarder.py
+```
+
+指定配置：
 
 ```powershell
 python examples/run_group_keyword_forwarder.py --config config/group_keyword_forwarder.json
 ```
 
-调试选项：
+调试与验证选项：
 
 ```powershell
 # 只打印命中，不实际发送
-python examples/run_group_keyword_forwarder.py --config config/group_keyword_forwarder.json --dry-run
+python examples/run_group_keyword_forwarder.py --dry-run
 
 # 只执行一轮，便于验配置
-python examples/run_group_keyword_forwarder.py --config config/group_keyword_forwarder.json --once
+python examples/run_group_keyword_forwarder.py --once
 
 # 打印窗口监听调试信息（建议排障时开启）
-python examples/run_group_keyword_forwarder.py --config config/group_keyword_forwarder.json --dry-run --debug
+python examples/run_group_keyword_forwarder.py --dry-run --debug
 ```
 
 ### 7.4 行为规则
 
 1. 启动时校验 `target_friend/groups/keywords` 必填；若 `target_friend` 出现在 `groups` 中直接报错退出。
-2. `use_window_listener=true` 时：启动后窗口保持打开，按 `runtime_id` 增量识别新 `ListItem`，不在每轮重复搜索会话。
-3. 命中流程：先排除词过滤，再关键词匹配。
-4. 去重指纹：`sha1(group + "|" + message)`，在 `dedupe_ttl_sec` 窗口内不重复提醒。
-5. 消息原文会截断到安全长度（500 字符）再拼模板，避免超长内容影响发送稳定性。
-6. 监听异常与发送异常只影响当前轮，不会中断主循环；支持 `Ctrl+C` 优雅退出。
-7. `{sender}` 与 `{send_time}` 采用消息文本的尽力解析，无法识别时分别回退为“未知发送者”“未知时间”。
-8. `use_window_listener=false` 或窗口监听异常时，可回退到 `use_direct_poll=true` 的轮询路径。
+2. 启动后先执行 warmup，跳过历史消息，仅处理后续新增消息。
+3. `use_window_listener=true` 时，按窗口新增项增量监听；监听窗口失效时会自动重开并恢复监听。
+4. 命中流程：先排除词，再关键词匹配；默认“命中即转发”。
+5. 当前实现没有额外“按消息时间区间过滤”，只要是新增且命中就会触发。
+6. 窗口监听模式下按消息项键去重；后备轮询模式按 `sha1(group + "|" + message)` + TTL 去重。
+7. 消息正文会截断到安全长度（500 字符）再拼模板，避免超长消息影响稳定性。
+8. `{sender}`/`{send_time}` 为尽力解析：解析不到时回退“未知发送者/未知时间”。
+9. 监听异常与发送异常只影响当前轮，不中断主循环；支持 `Ctrl+C` 优雅退出。
+
+### 7.5 限制与排障
+
+1. 发送人识别依赖 UI 文本可见性与结构；在部分聊天样式中可能稳定回退为“未知发送者”。
+2. 若出现“转发后不再监听”，请开启 `--debug` 观察是否触发自动重开日志：`reopened listener window for: ...`。
+3. 监听窗口遮挡主界面可调 `listener_window_offset_x`，例如 `-500` 表示向左偏移 500 像素。
+4. 若短时间高频消息较多，可提高 `max_send_per_cycle` 并结合 `send_delay_sec` 调整发送节奏。

@@ -122,3 +122,4 @@ Copy-Item config/sns_click_offsets.example.json config/sns_click_offsets.local.j
 1. 实现说明：`docs/implementation_guide.md`
 2. 测试集评测：`docs/testing_dataset_guide.md`
 3. Fork 同步：`docs/fork_sync_guide.md`
+4. 群关键词转发操作：`docs/group_keyword_forwarder_guide.md`
