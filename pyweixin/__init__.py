@@ -46,5 +46,17 @@ from pyweixin.WeChatAuto import Messages,Contacts,Files,FriendSettings,Moments,A
 from pyweixin.WeChatTools import Tools,Navigator
 from pyweixin.WinSettings import SystemSettings
 from pyweixin.Config import GlobalConfig
+# viper 扩展
+from pyweixin.moments_ext import (
+    fetch_and_comment_friend_moment,
+    fetch_and_comment_from_moments_feed,
+    dump_friend_moments,
+    like_posts,
+    like_friend_posts,
+    comment_flow,
+)
+from pyweixin.rush_engine import run_rush_loop,load_rush_config,resolve_answer,parse_answer_from_templates
+from pyweixin.rush_types import RushConfig,QuestionTemplate,AnswerResult
+from pyweixin.rush_ai import ArkResponsesProvider,SiliconFlowOpenAIProvider,NullAIProvider,NullOCRProvider,PaddleOCRProvider
 #Author:Hello-Mr-Crab
 #Contributor:Viper,Chanpoe,mrhan1993,nmhjklnm,clen1,guanjt3

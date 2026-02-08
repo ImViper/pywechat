@@ -1,0 +1,38 @@
+event_id: "changxiangsi-20260207-1200"
+target_friend_remark: "第七人格深南店客服"
+monitor_start: "2026-02-07 11:59:50"
+monitor_end: "2026-02-07 12:20:00"
+poll_interval_sec: 2.0
+include_keywords:
+  - "抢场"
+  - "长相思"
+  - "年华"
+exclude_keywords:
+  - "无效"
+  - "测试"
+ai_enabled: true
+ai_timeout_ms: 1200
+confidence_threshold: 0.5
+comment_once: true
+state_file: "rush_state.json"
+output_dir: "rush_moments_cache"
+is_maximize: false
+close_weixin: true
+default_answer: null
+templates:
+  - name: "nianhua-number-format-a"
+    priority: 1
+    trigger_patterns:
+      - "年华"
+      - "数量|几个|多少"
+    answer_patterns:
+      - "(?P<value>\\d+)\\s*年华"
+      - "年华\\s*(?P<value>\\d+)"
+    answer_format: "{value}年华"
+  - name: "generic-number-fallback"
+    priority: 99
+    trigger_patterns:
+      - "数量|个数|多少"
+    answer_patterns:
+      - "(?P<value>\\d+)"
+    answer_format: "{value}"

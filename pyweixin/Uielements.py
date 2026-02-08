@@ -82,6 +82,8 @@ class Buttons():
         self.GroupCallButton={'title':'多人通话','control_type':'Button'}#群聊界面里的多人通话
         self.PostButton={'title':'发表','control_type':'Button'}#微信朋友圈界面里的发表按钮
         self.BackButton={'title':'返回','control_type':'Button'}#微信朋友圈内的返回按钮
+        self.CommentButton={'title':'评论','control_type':'Button'}#朋友圈评论按钮
+        self.LikeButton={'title':'赞','control_type':'Button'}#朋友圈点赞按钮
 
 class Edits():
     '''微信主界面内所有类型为Edit(不包含独立窗口)的UI控件'''
@@ -98,6 +100,7 @@ class Edits():
         self.SnsEdit={'title':'','control_type':'Edit','class_name':"mmui::XValidatorTextEdit"}#朋友圈发布界面内的文本编辑框
         self.ChangeRemarkEdit={'control_type':'Edit','title':'修改备注'}#添加好友界面内的修改备注 
         self.InputEdit={'control_type':'Edit','auto_id':'chat_input_field'}#好友独立聊天窗口内的文本编辑框
+        self.SnsCommentEdit={'title':'','control_type':'Edit','class_name':'mmui::XValidatorTextEdit'}#朋友圈评论输入框(与发布输入框同类)
 
 class ListItems():
     def __init__(self):

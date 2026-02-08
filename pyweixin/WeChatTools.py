@@ -381,6 +381,8 @@ class Tools():
     def is_sns_at_bottom(listview:ListViewWrapper,listitem:ListItemWrapper):
         '''判断一个好友的朋友圈详情页面是否到达底部'''
         next_item=Tools.get_next_item(listview,listitem)
+        if next_item is None:
+            return True
         if next_item.class_name()=='mmui::AlbumBaseCell' and next_item.window_text()=='':#到达最底部
             return True
         return False
