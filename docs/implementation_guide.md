@@ -77,7 +77,7 @@
 2. `text_det_limit_side_len=1200`（可通过环境变量下调）
 3. 在极速参数 `PYWEIXIN_OCR_MAX_SIDE=560` 下，可接近 1 秒级（见测试文档）。
 
-你当前本机环境（Intel CPU）已验证可用 PaddleOCR 路径，详见：`docs/testing_dataset_guide.md`。
+你当前本机环境（Intel CPU）已验证可用 PaddleOCR 路径，详见：`docs/testing_dataset_guide.md`（统一入口：`examples/evaluate_test_cases.py`）。
 
 ---
 
@@ -182,3 +182,18 @@ python examples/run_group_keyword_forwarder.py --dry-run --debug
 2. 若出现“转发后不再监听”，请开启 `--debug` 观察是否触发自动重开日志：`reopened listener window for: ...`。
 3. 监听窗口遮挡主界面可调 `listener_window_offset_x`，例如 `-500` 表示向左偏移 500 像素。
 4. 若短时间高频消息较多，可提高 `max_send_per_cycle` 并结合 `send_delay_sec` 调整发送节奏。
+
+---
+
+## 8. 好友朋友圈保存能力（当前）
+
+朋友圈保存能力已整理为独立文档：
+
+1. `docs/moments_dump_guide.md`
+
+包含内容：
+
+1. `Moments.dump_friend_moments(...)` 当前参数与行为。
+2. `collect_friend_moments_questions*.py` 的命令用法。
+3. 详情保存、失败降级、去重与滚动策略。
+4. 输出目录结构与已知限制。

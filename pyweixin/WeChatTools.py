@@ -413,9 +413,23 @@ class Tools():
     @staticmethod
     def is_sns_at_bottom(listview:ListViewWrapper,listitem:ListItemWrapper):
         '''判断一个好友的朋友圈详情页面是否到达底部'''
-        next_item=Tools.get_next_item(listview,listitem)
-        if next_item.class_name()=='mmui::AlbumBaseCell' and next_item.window_text()=='':#到达最底部
+        try:
+            items=listview.children(control_type='ListItem')
+        except Exception:
+            return False
+        if not items:
             return True
+        idx=Tools._find_listitem_index(items,listitem)
+        if idx is None:
+            return False
+        if idx>=len(items)-1:
+            return True
+        next_item=items[idx+1]
+        try:
+            if next_item.class_name()=='mmui::AlbumBaseCell' and next_item.window_text()=='':#到达最底部
+                return True
+        except Exception:
+            return False
         return False
 
     @staticmethod
@@ -435,10 +449,60 @@ class Tools():
     @staticmethod
     def get_next_item(listview:ListViewWrapper,listitem:ListItemWrapper):
         '''获取当前listview中给定的listitem的下一个,如果该listitem是最后一个或不在该listview则返回None'''
-        items=listview.children(control_type='ListItem')
-        for i in range(len(items)):
-            if items[i]==listitem and i<len(items)-1:
-                return items[i+1]
+        try:
+            items=listview.children(control_type='ListItem')
+        except Exception:
+            return None
+        if not items:
+            return None
+        idx=Tools._find_listitem_index(items,listitem)
+        if idx is not None and idx<len(items)-1:
+            return items[idx+1]
+        return None
+
+    @staticmethod
+    def _listitem_signature(listitem:ListItemWrapper):
+        runtime_id=None
+        class_name=''
+        text=''
+        rect_key=None
+        try:
+            _runtime_id=getattr(listitem.element_info,'runtime_id',None)
+            if _runtime_id is not None:
+                runtime_id=tuple(_runtime_id)
+        except Exception:
+            runtime_id=None
+        try:
+            class_name=listitem.class_name()
+        except Exception:
+            class_name=''
+        try:
+            text=listitem.window_text()
+        except Exception:
+            text=''
+        try:
+            rec=listitem.rectangle()
+            rect_key=(rec.left,rec.top,rec.right,rec.bottom)
+        except Exception:
+            rect_key=None
+        return runtime_id,class_name,text,rect_key
+
+    @staticmethod
+    def _find_listitem_index(items:list[ListItemWrapper],target:ListItemWrapper):
+        for i,item in enumerate(items):
+            if item==target:
+                return i
+        target_runtime,target_class,target_text,target_rect=Tools._listitem_signature(target)
+        if target_runtime is not None:
+            for i,item in enumerate(items):
+                item_runtime,_,_,_=Tools._listitem_signature(item)
+                if item_runtime is not None and item_runtime==target_runtime:
+                    return i
+        if target_rect is not None:
+            for i,item in enumerate(items):
+                _,item_class,item_text,item_rect=Tools._listitem_signature(item)
+                if item_rect==target_rect and item_class==target_class and item_text==target_text:
+                    return i
         return None
 
     @staticmethod
@@ -841,11 +905,29 @@ class Navigator():
         chatinfo_pane,main_window=Navigator.open_chatinfo(friend=friend,is_maximize=is_maximize,search_pages=search_pages)
         friend_button=chatinfo_pane.child_window(title=friend,control_type='Button')
         if friend_button.exists(timeout=0.1):
-            time.sleep(1)
-            profile_button=friend_button.children(title='',control_type='Button')[0]
-            profile_button.click_input()
+            profile_button=None
+            for _ in range(10):
+                try:
+                    candidates=friend_button.children(title='',control_type='Button')
+                except Exception:
+                    candidates=[]
+                if candidates:
+                    profile_button=candidates[0]
+                    break
+                time.sleep(0.08)
+            if profile_button is not None:
+                profile_button.click_input()
+            else:
+                friend_button.click_input()
             profile_pane=desktop.window(**Windows.PopUpProfileWindow)
-            return profile_pane,main_window
+            if profile_pane.exists(timeout=0.8):
+                return profile_pane,main_window
+            # 兜底重试，减少固定sleep带来的额外耗时
+            for _ in range(6):
+                time.sleep(0.08)
+                if profile_pane.exists(timeout=0.1):
+                    return profile_pane,main_window
+            raise RuntimeError(f'无法打开好友 {friend} 的个人简介窗口')
         else:
             chatinfo_button=main_window.child_window(**Buttons.ChatInfoButton)
             chatinfo_button.click_input()
@@ -867,12 +949,66 @@ class Navigator():
         if search_pages is None:
             search_pages=GlobalConfig.search_pages
         profile_pane,main_window=Navigator.open_friend_profile(friend=friend,is_maximize=is_maximize,search_pages=search_pages)
-        moments_button=profile_pane.child_window(**Buttons.MomentsButton)
-        moments_button.click_input()
-        moments_window=Tools.move_window_to_center(Window=Windows.MomentsWindow)
+        clicked=False
+        button_selectors=[]
+        if hasattr(Buttons,'MomentsButton'):
+            button_selectors.append(getattr(Buttons,'MomentsButton'))
+        # 兼容不同微信小版本中好友资料页“朋友圈”入口控件定义差异
+        button_selectors.extend([
+            {'title':'朋友圈','control_type':'Button'},
+            {'title':'朋友圈'},
+            {'title_re':'朋友圈','control_type':'Button'},
+        ])
+
+        for selector in button_selectors:
+            try:
+                moments_button=profile_pane.child_window(**selector)
+                if moments_button.exists(timeout=0.2):
+                    moments_button.click_input()
+                    clicked=True
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            candidates=[]
+            try:
+                candidates=profile_pane.descendants(title='朋友圈')
+            except Exception:
+                candidates=[]
+            if not candidates:
+                try:
+                    candidates=profile_pane.descendants(title_re='朋友圈')
+                except Exception:
+                    candidates=[]
+            for candidate in candidates:
+                try:
+                    candidate.click_input()
+                    clicked=True
+                    break
+                except Exception:
+                    continue
+
+        if not clicked:
+            if close_weixin:
+                main_window.close()
+            raise RuntimeError('无法在好友资料页定位“朋友圈”入口控件')
+
+        last_error=None
+        for _ in range(10):
+            try:
+                moments_window=Tools.move_window_to_center(Window=Windows.MomentsWindow)
+                if close_weixin:
+                    main_window.close()
+                return moments_window
+            except Exception as exc:
+                last_error=exc
+                time.sleep(0.2)
         if close_weixin:
             main_window.close()
-        return moments_window
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError('打开好友朋友圈失败')
 
     @staticmethod
     def open_moments(is_maximize:bool=None,close_weixin:bool=None)->WindowSpecification:
@@ -1082,7 +1218,7 @@ class Navigator():
             search=main_window.descendants(**Main_window.Search)[0]
             search.click_input()
             search.set_text(friend)
-            time.sleep(1)
+            time.sleep(0.2)
             search_results=main_window.child_window(**Main_window.SearchResult).wait(wait_for='ready',timeout=2)
             search_result=Tools.get_search_result(friend=friend,search_result=search_results)
             chat_button=Navigator._find_sidebar_item(main_window=main_window,item_spec=SideBar.Chats)
@@ -1115,7 +1251,7 @@ class Navigator():
                 search=main_window.descendants(**Main_window.Search)[0]
                 search.click_input()
                 search.set_text(friend)
-                time.sleep(1)
+                time.sleep(0.2)
                 search_results=main_window.child_window(title='',control_type='List')
                 search_result=Tools.get_search_result(friend=friend,search_result=search_results)
                 if search_result:

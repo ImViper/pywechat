@@ -2162,61 +2162,83 @@ class Moments():
     @staticmethod
     def _open_comment_editor(moments_window,content_item,use_offset_fix:bool=False,pre_move_coords:tuple=None)->bool:
         """Click ellipsis and open comment input."""
+        print(f'[debug:open_editor] start, pre_move_coords={pre_move_coords}, use_offset_fix={use_offset_fix}')
         if Moments._wait_comment_editor_state(moments_window,opened=True,timeout=0.2,poll=0.05):
+            print('[debug:open_editor] editor already open')
             return True
         comment_button=moments_window.child_window(**Buttons.CommentButton)
-        for _ in range(_SNS_CLICK_RETRY):
+        for attempt in range(_SNS_CLICK_RETRY):
+            print(f'[debug:open_editor] attempt #{attempt+1}/{_SNS_CLICK_RETRY}')
             if pre_move_coords is not None:
                 mouse.move(coords=pre_move_coords)
+                print(f'[debug:open_editor] moved mouse to {pre_move_coords}')
             rect=content_item.rectangle()
+            print(f'[debug:open_editor] item rect: L={rect.left} T={rect.top} R={rect.right} B={rect.bottom}')
             x_offset=_SNS_ELLIPSIS_X_OFFSET
             if use_offset_fix:
                 win_rect=moments_window.rectangle()
                 x_offset+=(rect.left-win_rect.left)
             ellipsis_area=(rect.right-x_offset,rect.bottom-_SNS_ELLIPSIS_Y_OFFSET)
+            print(f'[debug:open_editor] clicking ellipsis at {ellipsis_area}')
             mouse.click(coords=ellipsis_area)
             time.sleep(0.2)
-            if comment_button.exists(timeout=0.6):
+            btn_exists=comment_button.exists(timeout=0.6)
+            print(f'[debug:open_editor] comment_button.exists={btn_exists}')
+            if btn_exists:
                 try:
                     comment_button.click_input()
-                except Exception:
-                    pass
-                if Moments._wait_comment_editor_state(moments_window,opened=True,timeout=0.8,poll=0.08):
-                    return True
+                    time.sleep(0.15)  # Give focus time to settle
+                    print('[debug:open_editor] clicked comment button, returning True')
+                    return True  # Trust that focus is now in input box
+                except Exception as e:
+                    print(f'[debug:open_editor] click_input failed: {e}')
             pyautogui.press('esc')
             time.sleep(0.1)
+        print('[debug:open_editor] all attempts failed, returning False')
         return False
 
     @staticmethod
     def _paste_and_send_comment(moments_window,text:str,anchor_mode:str='list',anchor_source=None,clear_first:bool=True)->bool:
         """Paste text and verify send success by editor close state."""
-        if not Moments._wait_comment_editor_state(moments_window,opened=True,timeout=0.6,poll=0.08):
-            return False
+        print(f'[debug:paste_send] start, text={text!r}, anchor_mode={anchor_mode}, clear_first={clear_first}')
+        editor_detected=Moments._wait_comment_editor_state(moments_window,opened=True,timeout=0.6,poll=0.08)
+        if not editor_detected:
+            print('[debug:paste_send] editor element not detected, but proceeding anyway (editor may be open)')
         if clear_first:
             pyautogui.hotkey('ctrl','a')
             pyautogui.press('backspace')
         SystemSettings.copy_text_to_windowsclipboard(text=text)
         pyautogui.hotkey('ctrl','v')
         time.sleep(0.1)
+        print('[debug:paste_send] pasted text')
         clicked_by_anchor=False
         if anchor_source is not None:
             try:
                 cr=anchor_source.rectangle()
+                print(f'[debug:paste_send] anchor rect: L={cr.left} T={cr.top} R={cr.right} B={cr.bottom}')
                 if anchor_mode=='list':
                     Moments._click_send_button(cr,x_offset=_SNS_SEND_LIST_X_OFFSET,y_offset=_SNS_SEND_LIST_Y_OFFSET)
                 else:
                     Moments._click_send_button(cr,x_offset=_SNS_SEND_DETAIL_X_OFFSET,y_offset=_SNS_SEND_DETAIL_Y_OFFSET)
                 clicked_by_anchor=True
-            except Exception:
+                print('[debug:paste_send] clicked send by anchor')
+            except Exception as e:
                 clicked_by_anchor=False
+                print(f'[debug:paste_send] anchor click failed: {e}')
         if not clicked_by_anchor:
             pyautogui.press('enter')
-        if Moments._wait_comment_editor_state(moments_window,opened=False,timeout=0.9,poll=0.08):
+            print('[debug:paste_send] pressed enter to send')
+        closed=Moments._wait_comment_editor_state(moments_window,opened=False,timeout=0.9,poll=0.08)
+        print(f'[debug:paste_send] editor closed after send={closed}')
+        if closed:
             return True
         if clicked_by_anchor:
             pyautogui.press('enter')
-            if Moments._wait_comment_editor_state(moments_window,opened=False,timeout=0.7,poll=0.08):
+            closed2=Moments._wait_comment_editor_state(moments_window,opened=False,timeout=0.7,poll=0.08)
+            print(f'[debug:paste_send] fallback enter, editor closed={closed2}')
+            if closed2:
                 return True
+        print('[debug:paste_send] returning False')
         return False
 
     @staticmethod
@@ -2254,7 +2276,7 @@ class Moments():
             else:
                 print(f'[comment] failed to send comment #{idx+1}')
             if idx<len(comments)-1:
-                time.sleep(0.5)
+                time.sleep(0.2)
         return sent_any
 
     @staticmethod
@@ -2469,7 +2491,17 @@ class Moments():
         return posts
 
     @staticmethod
-    def dump_friend_moments(friend:str,number:int,save_detail:bool=False,target_folder:str=None,is_maximize:bool=None,close_weixin:bool=None)->list[dict]:
+    def dump_friend_moments(
+        friend:str,
+        number:int,
+        save_detail:bool=False,
+        target_folder:str=None,
+        is_maximize:bool=None,
+        close_weixin:bool=None,
+        detail_content_filter:Callable[[str],bool]=None,
+        debug:bool=False,
+        search_pages:int=None
+    )->list[dict]:
         '''
         该方法用来获取某个好友的微信朋友圈的内一定数量的内容
         Args:
@@ -2479,9 +2511,22 @@ class Moments():
             target_folder:save_detail所需的文件夹路径
             is_maximize:微信界面是否全屏，默认不全屏
             close_weixin:任务结束后是否关闭微信，默认关闭
+            detail_content_filter:详情保存前的内容过滤函数，入参为文本内容，返回True时才保存详情
+            debug:是否打印详细调试日志
+            search_pages:打开好友聊天窗口时在会话列表滚动查找页数，0表示直接顶部搜索（更快）
         Returns:
             posts:朋友圈具体内容,list[dict]的格式,具体为[{'内容':xx,'图片数量':xx,'视频数量':xx,'发布时间':xx}]
         '''
+        def log_debug(message:str):
+            if not debug:
+                return
+            try:
+                now=time.strftime('%H:%M:%S')
+            except Exception:
+                now=''
+            prefix=f"[DUMP-DEBUG {now}] " if now else "[DUMP-DEBUG] "
+            print(prefix+str(message))
+
         def save_media(sns_detail_list:ListViewWrapper,photo_num:int,detail_folder:str,content:str):
             content_path=os.path.join(detail_folder,'内容.txt')
             capture_path=os.path.join(detail_folder,'内容截图.png')
@@ -2507,7 +2552,74 @@ class Moments():
                     SystemSettings.save_pasted_image(path)
                     pyautogui.press('right',interval=0.05)
                 pyautogui.press('esc')
-                backbutton.click_input()
+
+        def resolve_sns_detail_list(retries:int=6,wait:float=0.12):
+            last_error=None
+            selectors=[
+                Lists.SnsDetailList,
+                {'control_type':'List','auto_id':'sns_detail_list'},
+            ]
+            for _ in range(retries):
+                for selector in selectors:
+                    try:
+                        ctrl=moments_window.child_window(**selector)
+                        if ctrl.exists(timeout=0):
+                            return ctrl
+                    except Exception as exc:
+                        last_error=exc
+                time.sleep(wait)
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError('cannot locate friend moment detail list')
+
+        def build_item_key(listitem:ListItemWrapper):
+            text=''
+            class_name=''
+            try:
+                text=listitem.window_text()
+            except Exception:
+                text=''
+            try:
+                class_name=listitem.class_name()
+            except Exception:
+                class_name=''
+            compact_text=re.sub(r'\s+','',text)
+            if len(compact_text)>500:
+                compact_text=compact_text[:500]
+            digest=hashlib.sha1()
+            digest.update(class_name.encode('utf-8',errors='ignore'))
+            digest.update(compact_text.encode('utf-8',errors='ignore'))
+            # key should be stable across viewport jitter; do not include coordinates.
+            return ('item',digest.hexdigest())
+
+        def is_clickable_in_viewport(listitem:ListItemWrapper)->bool:
+            try:
+                if hasattr(listitem,'is_visible') and (not listitem.is_visible()):
+                    return False
+            except Exception:
+                pass
+            try:
+                item_rect=listitem.rectangle()
+                list_rect=moments_list.rectangle()
+                visible_w=min(item_rect.right,list_rect.right)-max(item_rect.left,list_rect.left)
+                visible_h=min(item_rect.bottom,list_rect.bottom)-max(item_rect.top,list_rect.top)
+                if visible_w<40 or visible_h<30:
+                    return False
+                center=item_rect.mid_point()
+                if center.x<list_rect.left+8 or center.x>list_rect.right-8:
+                    return False
+                if center.y<list_rect.top+8 or center.y>list_rect.bottom-8:
+                    return False
+            except Exception:
+                return False
+            return True
+
+        def click_item_in_viewport(listitem:ListItemWrapper):
+            item_rect=listitem.rectangle()
+            list_rect=moments_list.rectangle()
+            x=min(max(item_rect.mid_point().x,list_rect.left+16),list_rect.right-16)
+            y=min(max(item_rect.mid_point().y,list_rect.top+16),list_rect.bottom-16)
+            mouse.click(coords=(x,y))
 
         def parse_friend_post(listitem:ListItemWrapper):
             '''获取朋友圈文本中的时间戳,图片数量,以及剩余内容'''
@@ -2515,13 +2627,29 @@ class Moments():
             photo_num=0
             text=listitem.window_text()
             text=text.replace(friend,'')#先去掉头尾的空格去掉换行符
-            post_time=sns_detail_pattern.search(text).group(0)
+            post_time_match=sns_detail_pattern.search(text)
+            post_time=post_time_match.group(0) if post_time_match is not None else ''
             if re.search(rf'\s包含(\d+)张图片\s',text):
                 photo_num=int(re.search(r'\s包含(\d+)张图片\s',text).group(1))
-            if re.search(rf'\s视频\s{post_time}',text):
+            if post_time and re.search(rf'\s视频\s{re.escape(post_time)}',text):
                 video_num=1
-            content=re.sub(rf'\s((包含\d+张图片\s|视频\s).*{post_time})\s','',text)
+            if post_time:
+                content=re.sub(rf'\s((包含\d+张图片\s|视频\s).*{re.escape(post_time)})\s','',text)
+            else:
+                content=re.sub(r'\s(包含\d+张图片\s|视频\s?)\s*',' ',text)
+            content=content.strip()
             return content,photo_num,video_num,post_time
+
+        def build_post_fingerprint(content:str,post_time:str,photo_num:int,video_num:int,item_key)->str:
+            hasher=hashlib.sha1()
+            hasher.update((content or '').encode('utf-8',errors='ignore'))
+            hasher.update((post_time or '').encode('utf-8',errors='ignore'))
+            hasher.update(str(photo_num).encode('utf-8'))
+            hasher.update(str(video_num).encode('utf-8'))
+            # 当内容解析为空时，增加 item_key 兜底，避免不同帖子被误判同一条
+            if not (content or post_time):
+                hasher.update(str(item_key).encode('utf-8',errors='ignore'))
+            return hasher.hexdigest()
 
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
@@ -2540,35 +2668,255 @@ class Moments():
         recorded_num=0
         sns_detail_pattern=Regex_Patterns.Snsdetail_Timestamp_pattern#朋友圈好友发布内容左下角的时间戳pattern
         not_contents=['mmui::AlbumBaseCell','mmui::AlbumTopCell']#置顶内容不需要
-        moments_window=Navigator.open_friend_moments(friend=friend,is_maximize=is_maximize,close_weixin=close_weixin)
+        log_debug(
+            f"start friend={friend} number={number} save_detail={save_detail} "
+            f"has_filter={detail_content_filter is not None} search_pages={search_pages}"
+        )
+        moments_window=Navigator.open_friend_moments(
+            friend=friend,
+            search_pages=search_pages,
+            is_maximize=is_maximize,
+            close_weixin=close_weixin
+        )
         backbutton=moments_window.child_window(**Buttons.BackButton)
         #直接maximize不行,需要使用win32gui
         win32gui.SendMessage(moments_window.handle,win32con.WM_SYSCOMMAND,win32con.SC_MAXIMIZE,0)
         moments_list=moments_window.child_window(**Lists.MomentsList)
-        sns_detail_list=moments_window.child_window(**Lists.SnsDetailList)
+        moments_list.type_keys('{HOME}')
+        time.sleep(0.05)
         moments_list.type_keys('{PGDN}')
         moments_list.type_keys('{PGUP}')
-        contents=[listitem for listitem in moments_list.children(control_type='ListItem') if listitem.class_name() not in not_contents]
+        moments_list.type_keys('{HOME}')
+        contents=[
+            listitem for listitem in moments_list.children(control_type='ListItem')
+            if listitem.class_name() not in not_contents and is_clickable_in_viewport(listitem)
+        ]
+        log_debug(f"initial visible content count={len(contents)}")
         if contents:
+            unresolved_rounds=0
+            stagnant_scroll_rounds=0
+            no_pick_rounds=0
+            max_failures_per_item=2
+            processed_keys=set()
+            item_failures={}
+            seen_post_fingerprints=set()
+            loop_no=0
             while True:
-                moments_list.type_keys('{DOWN}')
-                selected=[listitem for listitem in moments_list.children(control_type='ListItem') if listitem.has_keyboard_focus()]
-                if selected and selected[0].class_name() not in not_contents:
-                    selected[0].click_input()
-                    listitem=sns_detail_list.children(control_type='ListItem')[0]
-                    content,photo_num,video_num,post_time=parse_friend_post(listitem)
-                    posts.append({'内容':content,'图片数量':photo_num,'视频数量':video_num,'发布时间':post_time})
-                    if save_detail:
-                        detail_folder=os.path.join(friend_folder,f'{recorded_num}')
-                        os.makedirs(detail_folder,exist_ok=True)
-                        save_media(sns_detail_list,photo_num,detail_folder,content)
-                    recorded_num+=1
-                    if sns_detail_list.exists(timeout=0.1):
-                        backbutton.click_input()
-                    if Tools.is_sns_at_bottom(moments_list,selected[0]):
+                loop_no+=1
+                # 验证列表控件是否还存在
+                try:
+                    if not moments_list.exists(timeout=0.3):
+                        log_debug("ERROR: moments_list control lost, attempting recovery")
+                        # 尝试重新定位列表
+                        try:
+                            moments_list=moments_window.child_window(**Lists.MomentsList)
+                            if not moments_list.exists(timeout=0.5):
+                                log_debug("FATAL: cannot recover moments_list, exiting")
+                                break
+                            log_debug("moments_list recovered successfully")
+                        except Exception as recovery_err:
+                            log_debug(f"FATAL: recovery failed: {recovery_err}")
+                            break
+                except Exception:
+                    pass  # exists() check failed, but continue to let normal flow handle it
+                
+                try:
+                    all_items=[
+                        listitem for listitem in moments_list.children(control_type='ListItem')
+                        if listitem.class_name() not in not_contents
+                    ]
+                except Exception:
+                    all_items=[]
+                visible_items=[item for item in all_items if is_clickable_in_viewport(item)]
+                log_debug(
+                    f"loop={loop_no} all={len(all_items)} visible={len(visible_items)} recorded={recorded_num} "
+                    f"processed={len(processed_keys)} unresolved={unresolved_rounds} stagnant={stagnant_scroll_rounds}"
+                )
+                if not visible_items:
+                    moments_list.type_keys('{DOWN}')
+                    stagnant_scroll_rounds+=1
+                    if stagnant_scroll_rounds>=80:
+                        log_debug("exit: no visible items after 80 down-scroll attempts")
                         break
-                if recorded_num>=number:
+                    if recorded_num>=number:
+                        log_debug("exit: reached target number while visible items empty")
+                        break
+                    continue
+                try:
+                    visible_items=sorted(visible_items,key=lambda li: li.rectangle().top)
+                except Exception:
+                    pass
+                visible_keys=[build_item_key(item) for item in visible_items]
+                unprocessed_pairs=[
+                    (key,item) for key,item in zip(visible_keys,visible_items)
+                    if key not in processed_keys
+                ]
+                if unprocessed_pairs:
+                    no_pick_rounds=0
+                    current_key,current_item=unprocessed_pairs[0]
+                    opened_detail=False
+                    quick_content=''
+                    quick_photo_num=0
+                    quick_video_num=0
+                    quick_post_time=''
+                    quick_fingerprint=None
+                    try:
+                        preview=current_item.window_text().replace('\n',' ')[:80]
+                    except Exception:
+                        preview=''
+                    log_debug(f"pick key={current_key} preview={preview}")
+                    try:
+                        quick_content,quick_photo_num,quick_video_num,quick_post_time=parse_friend_post(current_item)
+                        quick_fingerprint=build_post_fingerprint(
+                            quick_content,quick_post_time,quick_photo_num,quick_video_num,current_key
+                        )
+                        log_debug(
+                            f"quick_parse time={quick_post_time or '(none)'} photos={quick_photo_num} "
+                            f"videos={quick_video_num} text_len={len(quick_content)}"
+                        )
+                        log_debug("open detail: click list item")
+                        click_item_in_viewport(current_item)
+                        time.sleep(0.12)
+                        sns_detail_list=resolve_sns_detail_list()
+                        detail_items=sns_detail_list.children(control_type='ListItem')
+                        if not detail_items:
+                            raise RuntimeError('friend moment detail list is empty')
+                        opened_detail=True
+                        listitem=detail_items[0]
+                        content,photo_num,video_num,post_time=parse_friend_post(listitem)
+                        detail_fingerprint=build_post_fingerprint(
+                            content,post_time,photo_num,video_num,current_key
+                        )
+                        detail_index=recorded_num
+                        is_duplicate_detail=detail_fingerprint in seen_post_fingerprints
+                        if is_duplicate_detail:
+                            log_debug("detail duplicate fingerprint, skip append/save")
+                        else:
+                            posts.append({'内容':content,'图片数量':photo_num,'视频数量':video_num,'发布时间':post_time})
+                            seen_post_fingerprints.add(detail_fingerprint)
+                        should_save_detail=True
+                        if detail_content_filter is not None:
+                            try:
+                                should_save_detail=bool(detail_content_filter(content))
+                            except Exception:
+                                should_save_detail=True
+                        if save_detail and should_save_detail and (not is_duplicate_detail):
+                            detail_folder=os.path.join(friend_folder,f'{detail_index}')
+                            os.makedirs(detail_folder,exist_ok=True)
+                            save_media(sns_detail_list,photo_num,detail_folder,content)
+                            log_debug(f"detail saved: {detail_folder}")
+                        else:
+                            log_debug("detail not saved for this item")
+                        if not is_duplicate_detail:
+                            recorded_num+=1
+                        processed_keys.add(current_key)
+                        item_failures.pop(current_key,None)
+                        unresolved_rounds=0
+                        stagnant_scroll_rounds=0
+                    except Exception:
+                        unresolved_rounds+=1
+                        log_debug(f"process failed key={current_key} unresolved={unresolved_rounds}")
+                        fail_count=item_failures.get(current_key,0)+1
+                        item_failures[current_key]=fail_count
+                        if fail_count>=max_failures_per_item:
+                            processed_keys.add(current_key)
+                            # fallback to quick parsed content when detail pane can't be opened repeatedly
+                            if quick_fingerprint is None:
+                                quick_fingerprint=build_post_fingerprint(
+                                    quick_content,quick_post_time,quick_photo_num,quick_video_num,current_key
+                                )
+                            if quick_fingerprint not in seen_post_fingerprints:
+                                posts.append({
+                                    '内容':quick_content,
+                                    '图片数量':quick_photo_num,
+                                    '视频数量':quick_video_num,
+                                    '发布时间':quick_post_time
+                                })
+                                seen_post_fingerprints.add(quick_fingerprint)
+                                recorded_num+=1
+                                log_debug("fallback append quick content after repeated detail-open failures")
+                            item_failures.pop(current_key,None)
+                            unresolved_rounds=0
+                            stagnant_scroll_rounds=0
+                            log_debug(f"mark processed after repeated failures key={current_key} fail_count={fail_count}")
+                    finally:
+                        # 确保返回到列表视图
+                        back_success = False
+                        if opened_detail:
+                            try:
+                                # 增加超时时间，确保能找到返回按钮
+                                if backbutton.exists(timeout=0.5):
+                                    backbutton.click_input()
+                                    time.sleep(0.2)  # 等待列表重新加载
+                                    back_success = True
+                                    log_debug("back button clicked, returned to list")
+                                else:
+                                    log_debug("WARNING: back button not found after opening detail")
+                                    # 尝试ESC键返回
+                                    pyautogui.press('esc')
+                                    time.sleep(0.2)
+                                    log_debug("tried ESC key as fallback")
+                            except Exception as e:
+                                log_debug(f"ERROR returning to list: {e}")
+                                # 最后尝试ESC
+                                try:
+                                    pyautogui.press('esc')
+                                    time.sleep(0.2)
+                                except Exception:
+                                    pass
+                        else:
+                            log_debug("skip back: detail was not opened")
+                    if unresolved_rounds>=30:
+                        log_debug("exit: unresolved_rounds >= 30")
+                        break
+                    if recorded_num>=number:
+                        log_debug("exit: reached target number")
+                        break
+                    continue
+
+                no_pick_rounds+=1
+                before_keys=tuple(visible_keys)
+                scroll_key='{PGDN}' if stagnant_scroll_rounds>=1 else '{DOWN}'
+                moments_list.type_keys(scroll_key)
+                time.sleep(0.15)
+                try:
+                    after_all_items=[
+                        listitem for listitem in moments_list.children(control_type='ListItem')
+                        if listitem.class_name() not in not_contents
+                    ]
+                except Exception:
+                    after_all_items=[]
+                after_items=[item for item in after_all_items if is_clickable_in_viewport(item)]
+                try:
+                    after_items=sorted(after_items,key=lambda li: li.rectangle().top)
+                except Exception:
+                    pass
+                after_keys=tuple(build_item_key(item) for item in after_items)
+                if after_keys==before_keys:
+                    stagnant_scroll_rounds+=1
+                    log_debug(f"scroll no change key={scroll_key} stagnant={stagnant_scroll_rounds}")
+                    # 尝试刷新视口以触发UI重新渲染
+                    if stagnant_scroll_rounds % 10 == 0 and stagnant_scroll_rounds < 80:
+                        log_debug(f"stagnant={stagnant_scroll_rounds}, trying viewport refresh")
+                        moments_list.type_keys('{PGDN}')
+                        time.sleep(0.1)
+                        moments_list.type_keys('{PGUP}')
+                        time.sleep(0.1)
+                else:
+                    stagnant_scroll_rounds=0
+                    unresolved_rounds=0
+                    # keep processed keys across viewport jitter to avoid re-clicking same post
+                    log_debug(f"scroll changed visible window key={scroll_key}")
+                if no_pick_rounds>=120:
+                    log_debug("exit: no pick progress for 120 rounds")
                     break
+                if stagnant_scroll_rounds>=80:
+                    log_debug("exit: stagnant_scroll_rounds >= 80")
+                    break
+                if recorded_num>=number:
+                    log_debug("exit: reached target number after scrolling")
+                    break
+        log_debug(f"finished recorded={recorded_num} posts={len(posts)}")
         moments_window.close()
         return posts
 
@@ -2591,12 +2939,17 @@ class Moments():
             photo_num=0
             text=listitem.window_text()
             text=text.replace(friend,'')#先去掉头尾的空格去掉换行符
-            post_time=sns_detail_pattern.search(text).group(0)
+            post_time_match=sns_detail_pattern.search(text)
+            post_time=post_time_match.group(0) if post_time_match is not None else ''
             if re.search(rf'\s包含(\d+)张图片\s',text):
                 photo_num=int(re.search(r'\s包含(\d+)张图片\s',text).group(1))
-            if re.search(rf'\s视频\s{post_time}',text):
+            if post_time and re.search(rf'\s视频\s{re.escape(post_time)}',text):
                 video_num=1
-            content=re.sub(rf'\s((包含\d+张图片\s|视频\s).*{post_time})\s','',text)
+            if post_time:
+                content=re.sub(rf'\s((包含\d+张图片\s|视频\s).*{re.escape(post_time)})\s','',text)
+            else:
+                content=re.sub(r'\s(包含\d+张图片\s|视频\s?)\s*',' ',text)
+            content=content.strip()
             return content,photo_num,video_num,post_time
 
         def like(listview:ListViewWrapper,content_listitem:ListItemWrapper):
@@ -2894,6 +3247,26 @@ class Moments():
         moments_window:WindowSpecification=None
     )->dict:
         """Read first valid post in global feed, infer and comment in list mode."""
+        def refresh_moments_window(current_window,retries:int=4,wait:float=0.12):
+            """Re-acquire an alive MomentsWindow wrapper when UIA handle gets stale."""
+            last_error=None
+            for _ in range(retries):
+                try:
+                    if current_window is not None and current_window.exists(timeout=0.1):
+                        return current_window
+                except Exception as exc:
+                    last_error=exc
+                try:
+                    fresh_window=desktop.window(**Windows.MomentsWindow)
+                    if fresh_window.exists(timeout=0.2):
+                        return fresh_window
+                except Exception as exc:
+                    last_error=exc
+                time.sleep(wait)
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError('cannot locate moments window')
+
         def resolve_child_window(moments_window,criteria:dict,error_hint:str,retries:int=4,wait:float=0.12):
             last_error=None
             for _ in range(retries):
@@ -2933,6 +3306,39 @@ class Moments():
                         return candidate
             return Tools.get_next_item(moments_list,selected_item)
 
+        def reacquire_feed_list(retries:int=6,wait:float=0.12):
+            """Get a fresh feed list wrapper and try to focus it with retries."""
+            nonlocal moments_window
+            last_error=None
+            for _ in range(retries):
+                try:
+                    moments_window=refresh_moments_window(moments_window,retries=2,wait=0.06)
+                    feed_list=resolve_child_window(
+                        moments_window,Lists.MomentsList,'cannot locate moments feed list'
+                    )
+                    try:
+                        feed_list.set_focus()
+                    except Exception:
+                        try:
+                            lr=feed_list.rectangle()
+                            x=max(lr.left+20,min(lr.right-20,lr.mid_point().x))
+                            y=max(lr.top+20,min(lr.bottom-20,lr.mid_point().y))
+                            mouse.click(coords=(x,y))
+                            time.sleep(0.05)
+                        except Exception:
+                            pass
+                    return feed_list
+                except Exception as exc:
+                    last_error=exc
+                    try:
+                        pyautogui.press('esc')
+                    except Exception:
+                        pass
+                    time.sleep(wait)
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError('cannot locate moments feed list')
+
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
         if close_weixin is None:
@@ -2949,6 +3355,7 @@ class Moments():
             'publish_time':'',
             'fingerprint':'',
             'ai_answer':None,
+            'comment_attempted':False,
             'comment_posted':False,
             'error':None,
             'image_paths':[],
@@ -2985,6 +3392,7 @@ class Moments():
             if moments_window is None:
                 moments_window=Navigator.open_moments(is_maximize=False,close_weixin=False)
                 created_window=True
+            moments_window=refresh_moments_window(moments_window,retries=8,wait=0.08)
 
             if is_maximize:
                 try:
@@ -3006,13 +3414,23 @@ class Moments():
                     refresh_button.click_input()
                     time.sleep(0.15)
 
-            moments_list=resolve_child_window(moments_window,Lists.MomentsList,'cannot locate moments feed list')
-            moments_list.type_keys('{HOME}')
+            moments_list=reacquire_feed_list(retries=8,wait=0.12)
+            try:
+                moments_list.type_keys('{HOME}')
+            except Exception:
+                pyautogui.press('home')
             not_contents=['mmui::TimelineCommentCell','mmui::TimelineCell','mmui::TimelineAdGridImageCell']
             selected_item=None
             for _ in range(15):
-                moments_list.type_keys('{DOWN}',pause=0.05)
-                selected=[li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
+                try:
+                    moments_list.type_keys('{DOWN}',pause=0.05)
+                except Exception:
+                    pyautogui.press('down')
+                try:
+                    selected=[li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
+                except Exception:
+                    moments_list=reacquire_feed_list(retries=4,wait=0.1)
+                    selected=[li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
                 if selected and selected[0].class_name() not in not_contents:
                     selected_item=selected[0]
                     break
@@ -3106,30 +3524,146 @@ class Moments():
                     return result
 
             result['success']=True
-            ai_answer=ai_callback(content,result['image_paths'])
-            result['ai_answer']=ai_answer
-            if isinstance(ai_answer,list):
-                answer_list=[a.strip() for a in ai_answer if isinstance(a,str) and a.strip()]
-            elif isinstance(ai_answer,str) and ai_answer.strip():
-                answer_list=[ai_answer.strip()]
+
+            # Start AI callback (may return queue for streaming or direct result)
+            import queue as _queue_mod
+            print('[debug:main] starting ai_callback + reacquire in parallel')
+            parallel_start=time.time()
+            cb_result=ai_callback(content,result['image_paths'])
+            is_streaming=isinstance(cb_result,_queue_mod.Queue)
+
+            if is_streaming:
+                answer_queue=cb_result
+                print('[debug:main] streaming mode: answers will arrive via queue')
             else:
-                answer_list=[]
-            if not answer_list:
+                answer_queue=None
+
+            # Re-acquire feed list (runs while OCR/AI process in background)
+            time.sleep(0.15)
+            print('[debug:reacquire] re-acquiring feed list')
+            moments_list=reacquire_feed_list(retries=10,wait=0.15)
+            print(f'[debug:reacquire] feed list acquired')
+            try:
+                moments_list.type_keys('{HOME}')
+            except Exception:
+                pyautogui.press('home')
+            time.sleep(0.1)
+
+            # Find first valid content item
+            print('[debug:reacquire] searching for valid content item')
+            selected_item = None
+            for nav_i in range(15):
+                try:
+                    moments_list.type_keys('{DOWN}',pause=0.05)
+                except Exception:
+                    pyautogui.press('down')
+                try:
+                    candidates=[li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
+                except Exception:
+                    moments_list=reacquire_feed_list(retries=4,wait=0.1)
+                    candidates=[li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
+                if candidates:
+                    cls=candidates[0].class_name()
+                    print(f'[debug:reacquire] nav #{nav_i+1} focused class={cls}')
+                    if 'TimelineCommentCell' not in cls and 'TimelineCell' not in cls and 'AdGridImage' not in cls:
+                        selected_item=candidates[0]
+                        try:
+                            item_text=selected_item.window_text()[:80]
+                        except Exception:
+                            item_text='(cannot read)'
+                        print(f'[debug:reacquire] found valid item: {item_text}')
+                        break
+                else:
+                    print(f'[debug:reacquire] nav #{nav_i+1} no focused candidate')
+
+            if selected_item is None:
+                print('[debug:reacquire] FAILED - no valid item found after 15 attempts')
+                result['error']='cannot re-acquire post for commenting'
                 return result
 
             comment_listitem=resolve_feed_comment_anchor(moments_list,selected_item)
-            posted=Moments._comment_flow(
-                moments_window,selected_item,answer_list,
-                anchor_mode='list',anchor_source=comment_listitem,
-                use_offset_fix=False,clear_first=False
-            )
-            result['comment_posted']=posted
-            if not posted and not result.get('error'):
-                result['error']='comment flow finished but send was not verified'
+            win_rect=moments_window.rectangle()
+            center_point=(win_rect.mid_point().x,win_rect.mid_point().y)
+            reacquire_ms=int((time.time()-parallel_start)*1000)
+            print(f'[debug:reacquire] ready to comment ({reacquire_ms}ms since parallel start)')
+
+            if is_streaming:
+                # Streaming mode: post each answer as it arrives from the queue
+                result['comment_attempted']=True
+                posted_any=False
+                all_answers=[]
+                comment_count=0
+                while True:
+                    try:
+                        answer=answer_queue.get(timeout=15)
+                    except _queue_mod.Empty:
+                        print('[debug:stream] queue timeout, stopping')
+                        break
+                    if answer is None:
+                        print('[debug:stream] sentinel received, all answers processed')
+                        break
+                    answer=str(answer).strip()
+                    if not answer:
+                        continue
+                    all_answers.append(answer)
+                    comment_count+=1
+                    print(f'[debug:stream] posting comment #{comment_count}: {answer!r}')
+                    # Re-resolve anchor for each comment (UI may shift after posting)
+                    if comment_count>1:
+                        try:
+                            comment_listitem=resolve_feed_comment_anchor(moments_list,selected_item)
+                        except Exception:
+                            pass
+                    posted=Moments._comment_flow(
+                        moments_window,selected_item,[answer],
+                        anchor_mode='list',anchor_source=comment_listitem,
+                        use_offset_fix=False,clear_first=False,
+                        pre_move_coords=center_point
+                    )
+                    if posted:
+                        posted_any=True
+                        print(f'[debug:stream] comment #{comment_count} posted OK')
+                    else:
+                        print(f'[debug:stream] comment #{comment_count} post FAILED')
+
+                total_ms=int((time.time()-parallel_start)*1000)
+                print(f'[debug:main] streaming done: {comment_count} comments, {total_ms}ms total')
+                result['ai_answer']=all_answers if len(all_answers)!=1 else all_answers[0]
+                result['comment_posted']=posted_any
+                if not posted_any and not result.get('error'):
+                    result['error']='comment flow finished but send was not verified'
+            else:
+                # Batch mode (backward compatible): wait for full result then post
+                ai_answer=cb_result
+                print(f'[debug:main] batch mode, ai_callback returned: {ai_answer!r}')
+                result['ai_answer']=ai_answer
+                if isinstance(ai_answer,list):
+                    answer_list=[a.strip() for a in ai_answer if isinstance(a,str) and a.strip()]
+                elif isinstance(ai_answer,str) and ai_answer.strip():
+                    answer_list=[ai_answer.strip()]
+                else:
+                    answer_list=[]
+                if not answer_list:
+                    return result
+                result['comment_attempted']=True
+                print(f'[debug:comment] calling _comment_flow with answers={answer_list}')
+                posted=Moments._comment_flow(
+                    moments_window,selected_item,answer_list,
+                    anchor_mode='list',anchor_source=comment_listitem,
+                    use_offset_fix=False,clear_first=False,
+                    pre_move_coords=center_point
+                )
+                result['comment_posted']=posted
+                if not posted and not result.get('error'):
+                    result['error']='comment flow finished but send was not verified'
+
             return result
 
         except Exception as e:
             result['error']=str(e)
+            if result.get('ai_answer') and not result.get('comment_attempted'):
+                # AI result exists but comment flow never started; caller should retry.
+                result['success']=False
             import traceback
             traceback.print_exc()
             return result

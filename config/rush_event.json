@@ -14,7 +14,7 @@
     "测试"
   ],
   "ai_enabled": true,
-  "ai_timeout_ms": 1200,
+  "ai_timeout_ms": 5000,
   "confidence_threshold": 0.5,
   "comment_once": true,
   "state_file": "rush_state.json",
@@ -24,26 +24,25 @@
   "default_answer": null,
   "templates": [
     {
-      "name": "nianhua-number-format-a",
+      "name": "character-count-by-occurrence",
       "priority": 1,
       "trigger_patterns": [
-        "年华",
-        "数量|几个|多少"
+        "百里辞|楚凭阑|晋王|晏如晦|从嘉|方驰|耶律洪|萧寻|红袖|胡不医|顾知意|赵岚|年华",
+        "数量|几个|几位|多少|共有"
       ],
       "answer_patterns": [
-        "(?P<value>\\d+)\\s*年华",
-        "年华\\s*(?P<value>\\d+)"
+        "(?P<name>百里辞|楚凭阑|晋王|晏如晦|从嘉|方驰|耶律洪|萧寻|红袖|胡不医|顾知意|赵岚|年华)"
       ],
-      "answer_format": "{value}年华"
+      "answer_format": "COUNT:{name}"
     },
     {
-      "name": "generic-number-fallback",
+      "name": "generic-number-strict",
       "priority": 99,
       "trigger_patterns": [
-        "数量|个数|多少"
+        "数量|个数|多少|几个"
       ],
       "answer_patterns": [
-        "(?P<value>\\d+)"
+        "(?<![\\d:：])(?P<value>\\d+)(?![\\d:：])"
       ],
       "answer_format": "{value}"
     }

@@ -128,7 +128,7 @@ def _extract_match_value(match: re.Match[str]) -> tuple[str, dict[str, str]]:
     return match.group(0), groups
 
 
-def parse_answer_from_templates(question_text: str, templates: list[QuestionTemplate]) -> AnswerResult | None:
+def parse_answer_from_templates(question_text: str, templates: list[QuestionTemplate], skip_count_templates: bool = False) -> AnswerResult | None:
     """Try template matching first for fastest answer extraction."""
     if not templates:
         return None
@@ -137,6 +137,46 @@ def parse_answer_from_templates(question_text: str, templates: list[QuestionTemp
         if template.trigger_patterns:
             if not any(re.search(pattern, question_text, flags=re.IGNORECASE) for pattern in template.trigger_patterns):
                 continue
+        
+        # Special handling for character counting templates (answer_format contains "COUNT:")
+        if template.answer_format and "COUNT:" in template.answer_format:
+            if skip_count_templates:  # Skip COUNT templates when requested
+                continue
+            
+            for pattern in template.answer_patterns:
+                matches = list(re.finditer(pattern, question_text, flags=re.IGNORECASE))
+                if not matches:
+                    continue
+                
+                # DEBUG: Print raw matches
+                print(f"[DEBUG] Pattern: {pattern}")
+                print(f"[DEBUG] Question text length: {len(question_text)}")
+                print(f"[DEBUG] Question text content:\n{question_text}")
+                print(f"[DEBUG] Total matches found: {len(matches)}")
+                
+                # Count occurrences of each character name
+                char_counts = {}
+                for match in matches:
+                    groups = match.groupdict()
+                    if "name" in groups and groups["name"]:
+                        char_name = groups["name"].strip()
+                        char_counts[char_name] = char_counts.get(char_name, 0) + 1
+                
+                print(f"[DEBUG] Character counts: {char_counts}")
+                
+                # Return the most common character name with its count
+                if char_counts:
+                    most_common = max(char_counts.items(), key=lambda x: x[1])
+                    char_name, count = most_common
+                    answer = f"{count}{char_name}"
+                    return AnswerResult(
+                        answer=answer,
+                        confidence=0.95,
+                        source=f"template:{template.name}",
+                        extra={"template": template.name, "count": count, "name": char_name, "all_counts": char_counts},
+                    )
+        
+        # Standard pattern matching
         for pattern in template.answer_patterns:
             match = re.search(pattern, question_text, flags=re.IGNORECASE)
             if not match:
@@ -250,7 +290,8 @@ def resolve_answer(
     ).strip()
     question_text = base_question_text or (post_content or "").strip()
 
-    result = parse_answer_from_templates(question_text, templates)
+    # First pass: skip COUNT templates (they need OCR text to count properly)
+    result = parse_answer_from_templates(question_text, templates, skip_count_templates=True)
     if result:
         result.latency_ms = int((time.perf_counter() - start) * 1000)
         return result
@@ -263,7 +304,8 @@ def resolve_answer(
                 for part in (question_text, ocr_text)
                 if part and part.strip()
             ).strip()
-            result = parse_answer_from_templates(question_text, templates)
+            # Second pass: now allow COUNT templates with OCR text
+            result = parse_answer_from_templates(question_text, templates, skip_count_templates=False)
             if result:
                 result.latency_ms = int((time.perf_counter() - start) * 1000)
                 return result

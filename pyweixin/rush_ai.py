@@ -399,10 +399,11 @@ class ArkChatProvider:
     model: str = "doubao-seed-1-8-251228"
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     system_prompt: str = (
-        "抢答助手。只输出总数量答案，格式：数字+对象名。\n"
-        "例如题目问几个年华→回答 4年华（不是 1年华、2年华...）\n"
-        "题目问几个葫芦→回答 3葫芦（不是 1葫芦、2葫芦...）\n"
-        "非题目→SKIP"
+        "抢答助手。只输出答案，不解释.\\n"
+        "1. 问角色名数量（如楚凭阑、胡不医）→ 数字+角色名，如 4年华\\n"
+        "2. 问物品/动作数量（如葫芦、拿剑的人）→ 只要数字，如 3\\n"
+        "3. 数学题 → 只要数字答案，如 7\\n"
+        "4. 非题目 → SKIP"
     )
     max_tokens: int = 32
     temperature: float = 0.7

@@ -124,112 +124,38 @@ def main() -> None:
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
-    def try_ocr_count(content: str, image_paths: list[str]) -> str | None:
-        if ocr_provider is None or not image_paths:
+    # Use concurrent callback for parallel OCR+AI with dual commenting
+    from pyweixin.rush_callback import create_concurrent_callback
+
+    concurrent_cb = create_concurrent_callback(
+        ocr_provider=ocr_provider,
+        ai_provider=ai_provider,
+        verbose=True,
+    )
+
+    def ai_callback(content: str, image_paths: list[str]) -> list[str] | str | None:
+        """Wrapper that calls concurrent callback and returns unique answers as list."""
+        results = concurrent_cb(content, image_paths)
+        if not results:
             return None
-
-        target = None
-        m = re.search(r'[\u201c"](.*?)[\u201d"]', content)
-        if m:
-            target = m.group(1).strip()
-
-        if not target:
-            print("[OCR] No quoted keyword found in question, skip OCR counting")
+        
+        # Deduplicate answers while preserving order (fastest first)
+        seen = set()
+        unique_answers = []
+        for r in results:
+            if r.answer not in seen:
+                seen.add(r.answer)
+                unique_answers.append(r.answer)
+        
+        if not unique_answers:
             return None
+        if len(unique_answers) == 1:
+            return unique_answers[0]
+        
+        # Multiple different answers: return all for dual commenting
+        print(f"[dual] posting {len(unique_answers)} different answers: {unique_answers}")
+        return unique_answers
 
-        print(f"[OCR] target keyword: {target}")
-        start_time = time.time()
-
-        total_count = 0
-        for img_path in image_paths:
-            try:
-                ocr_text = ocr_provider.extract_text(img_path)
-                if not ocr_text:
-                    print(f"[OCR] {os.path.basename(img_path)}: no text")
-                    continue
-                texts = [line.strip() for line in ocr_text.splitlines() if line.strip()]
-                count = sum(txt.count(target) for txt in texts)
-                total_count += count
-                print(f"[OCR] {os.path.basename(img_path)}: lines={len(texts)} matched={count}")
-            except Exception as exc:
-                print(f"[OCR] failed on {img_path}: {exc}")
-
-        elapsed = int((time.time() - start_time) * 1000)
-        if total_count > 0:
-            answer = f"{total_count}{target}"
-            print(f"[OCR] answer={answer} ({elapsed}ms)")
-            return answer
-
-        print(f"[OCR] no match for '{target}', fallback to AI ({elapsed}ms)")
-        return None
-
-    def try_ai_answer(content: str, image_paths: list[str]) -> str | None:
-        start_time = time.time()
-        try:
-            result = ai_provider.answer_from_text_and_images(content, image_paths, [])
-            elapsed = int((time.time() - start_time) * 1000)
-            if result is None:
-                print(f"[AI] no answer ({elapsed}ms)")
-                return None
-
-            answer = ""
-            if hasattr(result, "answer") and result.answer:
-                answer = result.answer
-            elif isinstance(result, dict) and result.get("answer"):
-                answer = str(result.get("answer", ""))
-            elif isinstance(result, str):
-                answer = result
-
-            answer = str(answer).strip()
-            bad_patterns = ["AnswerResult(", "confidence=", "source=", "latency_ms=", "extra={"]
-            for pattern in bad_patterns:
-                if pattern in answer:
-                    match = re.search(r"answer=['\"]([^'\"]+)['\"]", answer)
-                    if match:
-                        answer = match.group(1).strip()
-                    else:
-                        return None
-                    break
-
-            if answer:
-                print(f"[AI] answer={answer} ({elapsed}ms)")
-                return answer
-            print(f"[AI] empty answer ({elapsed}ms)")
-            return None
-        except Exception as exc:
-            print(f"[AI] failed: {exc}")
-            return None
-
-    def ai_callback(content: str, image_paths: list[str]):
-        """Prefer OCR answer first; fallback to AI. Return one final answer only."""
-        print(f"[recognize] start text_len={len(content)} images={len(image_paths)}")
-        callback_start = time.time()
-
-        ocr_answer = try_ocr_count(content, image_paths)
-        if ocr_answer:
-            if not compare_with_ai_after_ocr_hit:
-                elapsed = int((time.time() - callback_start) * 1000)
-                print(f"[recognize] OCR hit, skip AI ({elapsed}ms)")
-                return ocr_answer
-            print("[recognize] OCR hit, compare mode enabled, continue with AI")
-
-        ai_answer = try_ai_answer(content, image_paths)
-        if ocr_answer:
-            elapsed = int((time.time() - callback_start) * 1000)
-            if ai_answer:
-                if ai_answer == ocr_answer:
-                    print(f"[recognize] OCR/AI consistent: {ocr_answer} ({elapsed}ms)")
-                else:
-                    print(f"[recognize] OCR/AI mismatch: OCR={ocr_answer}, AI={ai_answer} ({elapsed}ms)")
-            else:
-                print(f"[recognize] OCR hit, AI empty, use OCR ({elapsed}ms)")
-            return ocr_answer
-
-        if ai_answer:
-            elapsed = int((time.time() - callback_start) * 1000)
-            print(f"[recognize] use AI answer: {ai_answer} ({elapsed}ms)")
-            return ai_answer
-        return None
 
     from pyweixin.WeChatAuto import Moments
 
