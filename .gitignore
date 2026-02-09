@@ -44,3 +44,12 @@ local_workspace/
 /test_ai_answer.py
 /test_ocr_benchmark.py
 /test_ocr_count.py
+
+# Hook DLL build artifacts
+hook/build/
+*.dll
+pywechat_hook.log
+
+# Hook reverse engineering tool outputs
+hook/tools/hook_candidates_log.txt
+hook/tools/rtti_results.json

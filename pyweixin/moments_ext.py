@@ -1583,19 +1583,40 @@ def fetch_and_comment_from_moments_feed(
             posted_any = False
             all_answers = []
             comment_count = 0
+
+            # Hook 路径（通过 PYWEIXIN_HOOK_ENABLED=1 启用）
+            _hook_dispatcher = None
+            _use_hook = False
+            if os.environ.get('PYWEIXIN_HOOK_ENABLED', '0') == '1':
+                try:
+                    from .comment_dispatcher import CommentDispatcher
+                    _hook_dispatcher = CommentDispatcher.from_env(
+                        moments_window=moments_window, content_item=selected_item,
+                        anchor_mode='list', anchor_source=comment_listitem,
+                        pre_move_coords=center_point,
+                    )
+                    _use_hook = _hook_dispatcher._hook_sender is not None
+                    if _use_hook:
+                        print('[debug:stream] hook dispatcher active')
+                    else:
+                        print('[debug:stream] hook enabled but DLL not connected, using UI')
+                except Exception as e:
+                    print(f'[debug:stream] hook dispatcher init error: {e}')
+
             # 预开编辑器：在等待 AI/OCR 答案期间先点开评论输入框
             editor_preloaded = False
-            try:
-                editor_preloaded = open_comment_editor(
-                    moments_window, selected_item,
-                    use_offset_fix=False, pre_move_coords=center_point
-                )
-                if editor_preloaded:
-                    print('[debug:stream] editor pre-opened while waiting for answers')
-                else:
-                    print('[debug:stream] editor pre-open failed, will retry per comment')
-            except Exception as e:
-                print(f'[debug:stream] editor pre-open error: {e}')
+            if not _use_hook:
+                try:
+                    editor_preloaded = open_comment_editor(
+                        moments_window, selected_item,
+                        use_offset_fix=False, pre_move_coords=center_point
+                    )
+                    if editor_preloaded:
+                        print('[debug:stream] editor pre-opened while waiting for answers')
+                    else:
+                        print('[debug:stream] editor pre-open failed, will retry per comment')
+                except Exception as e:
+                    print(f'[debug:stream] editor pre-open error: {e}')
             while True:
                 try:
                     answer = answer_queue.get(timeout=15)
@@ -1611,25 +1632,37 @@ def fetch_and_comment_from_moments_feed(
                 all_answers.append(answer)
                 comment_count += 1
                 print(f'[debug:stream] posting comment #{comment_count}: {answer!r}')
-                if comment_count == 1 and editor_preloaded:
-                    # 编辑器已预开，直接粘贴发送，跳过编辑器检测
-                    posted = paste_and_send_comment(
-                        moments_window, answer,
-                        anchor_mode='list', anchor_source=comment_listitem,
-                        clear_first=False, skip_editor_check=True
-                    )
-                else:
-                    if comment_count > 1:
-                        try:
-                            comment_listitem = resolve_feed_comment_anchor(moments_list, selected_item)
-                        except Exception:
-                            pass
-                    posted = comment_flow(
-                        moments_window, selected_item, [answer],
-                        anchor_mode='list', anchor_source=comment_listitem,
-                        use_offset_fix=False, clear_first=False,
-                        pre_move_coords=center_point
-                    )
+                posted = False
+                # Hook 路径
+                if _use_hook and _hook_dispatcher is not None:
+                    hook_result = _hook_dispatcher.post_comment(
+                        answer, author='',
+                        content_hash=result.get('fingerprint', ''))
+                    posted = hook_result.success
+                    if not posted:
+                        print(f'[debug:stream] hook failed, falling back to UI')
+                        _use_hook = False
+                # UI 路径（原有逻辑不变）
+                if not posted:
+                    if comment_count == 1 and editor_preloaded:
+                        # 编辑器已预开，直接粘贴发送，跳过编辑器检测
+                        posted = paste_and_send_comment(
+                            moments_window, answer,
+                            anchor_mode='list', anchor_source=comment_listitem,
+                            clear_first=False, skip_editor_check=True
+                        )
+                    else:
+                        if comment_count > 1:
+                            try:
+                                comment_listitem = resolve_feed_comment_anchor(moments_list, selected_item)
+                            except Exception:
+                                pass
+                        posted = comment_flow(
+                            moments_window, selected_item, [answer],
+                            anchor_mode='list', anchor_source=comment_listitem,
+                            use_offset_fix=False, clear_first=False,
+                            pre_move_coords=center_point
+                        )
                 if posted:
                     posted_any = True
                     print(f'[debug:stream] comment #{comment_count} posted OK')
