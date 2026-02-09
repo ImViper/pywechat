@@ -1474,36 +1474,36 @@ def fetch_and_comment_from_moments_feed(
                     (rect.mid_point().x, rect.bottom - 100),
                 ]
                 opened = False
+                img_start = time.time()
                 for open_pos in open_candidates:
                     try:
                         mouse.click(coords=open_pos)
                         time.sleep(0.08)
+                        # Verify viewer opened via right-click menu check
                         mouse.right_click(coords=viewer_right_click_pos)
                         copy_menu = moments_window.child_window(**MenuItems.CopyMenuItem)
                         if copy_menu.exists(timeout=0.15):
-                            copy_menu.click_input()
-                            time.sleep(0.15)
+                            # Viewer confirmed open - dismiss menu, screenshot instead of clipboard copy
+                            pyautogui.press('esc')
+                            time.sleep(0.03)
                             first_img_path = os.path.join(run_folder, '0.png')
-                            SystemSettings.save_pasted_image(first_img_path)
+                            moments_window.capture_as_image().save(first_img_path)
                             if os.path.isfile(first_img_path):
                                 result['image_paths'].append(first_img_path)
                                 opened = True
                                 for i in range(1, image_count):
                                     pyautogui.press('right', interval=0.08)
-                                    time.sleep(0.1)
-                                    mouse.right_click(coords=viewer_right_click_pos)
-                                    copy_menu = moments_window.child_window(**MenuItems.CopyMenuItem)
-                                    if copy_menu.exists(timeout=0.15):
-                                        copy_menu.click_input()
-                                        time.sleep(0.15)
-                                        img_path = os.path.join(run_folder, f'{i}.png')
-                                        SystemSettings.save_pasted_image(img_path)
-                                        if os.path.isfile(img_path):
-                                            result['image_paths'].append(img_path)
-                                break
+                                    time.sleep(0.08)
+                                    img_path = os.path.join(run_folder, f'{i}.png')
+                                    moments_window.capture_as_image().save(img_path)
+                                    if os.path.isfile(img_path):
+                                        result['image_paths'].append(img_path)
+                            break
                     finally:
                         pyautogui.press('esc')
                         time.sleep(0.05)
+                img_elapsed = int((time.time() - img_start) * 1000)
+                print(f'[debug:img] extracted {len(result["image_paths"])}/{image_count} images ({img_elapsed}ms)')
                 if (not opened) and image_count > 0:
                     result['error'] = 'list mode cannot extract images, skipped'
                     result['success'] = True
