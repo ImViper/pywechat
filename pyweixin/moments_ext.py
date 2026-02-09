@@ -378,12 +378,15 @@ def open_comment_editor(moments_window, content_item, use_offset_fix: bool = Fal
     return False
 
 
-def paste_and_send_comment(moments_window, text: str, anchor_mode: str = 'list', anchor_source=None, clear_first: bool = True) -> bool:
+def paste_and_send_comment(moments_window, text: str, anchor_mode: str = 'list', anchor_source=None, clear_first: bool = True, skip_editor_check: bool = False) -> bool:
     """Paste text and verify send success by editor close state."""
     print(f'[debug:paste_send] start, text={text!r}, anchor_mode={anchor_mode}, clear_first={clear_first}')
-    editor_detected = wait_comment_editor_state(moments_window, opened=True, timeout=0.2, poll=0.05)
-    if not editor_detected:
-        print('[debug:paste_send] editor element not detected, but proceeding anyway (editor may be open)')
+    if skip_editor_check:
+        print('[debug:paste_send] skip_editor_check=True, editor assumed open')
+    else:
+        editor_detected = wait_comment_editor_state(moments_window, opened=True, timeout=0.2, poll=0.05)
+        if not editor_detected:
+            print('[debug:paste_send] editor element not detected, but proceeding anyway (editor may be open)')
     if clear_first:
         pyautogui.hotkey('ctrl', 'a')
         pyautogui.press('backspace')
@@ -1609,11 +1612,11 @@ def fetch_and_comment_from_moments_feed(
                 comment_count += 1
                 print(f'[debug:stream] posting comment #{comment_count}: {answer!r}')
                 if comment_count == 1 and editor_preloaded:
-                    # 编辑器已预开，直接粘贴发送
+                    # 编辑器已预开，直接粘贴发送，跳过编辑器检测
                     posted = paste_and_send_comment(
                         moments_window, answer,
                         anchor_mode='list', anchor_source=comment_listitem,
-                        clear_first=False
+                        clear_first=False, skip_editor_check=True
                     )
                 else:
                     if comment_count > 1:
