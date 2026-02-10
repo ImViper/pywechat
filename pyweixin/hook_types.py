@@ -69,11 +69,23 @@ class CommentCommand(PipeCommand):
     sns_id: str = ""
     content: str = ""
     reply_to: str = ""
+    allow_queue_fallback: bool = False
+    prefer_arg1_template: bool = True
+    execution_mode: str = "pipe_thread"
+    wait_timeout_ms: int = 1500
     cmd: str = field(default="comment", init=False)
 
     def _as_dict(self) -> dict[str, Any]:
         d = PipeCommand._as_dict(self)
-        d.update(sns_id=self.sns_id, content=self.content, reply_to=self.reply_to)
+        d.update(
+            sns_id=self.sns_id,
+            content=self.content,
+            reply_to=self.reply_to,
+            allow_queue_fallback=self.allow_queue_fallback,
+            prefer_arg1_template=self.prefer_arg1_template,
+            execution_mode=self.execution_mode,
+            wait_timeout_ms=self.wait_timeout_ms,
+        )
         return d
 
 
@@ -86,6 +98,113 @@ class QuerySnsIdCommand(PipeCommand):
     def _as_dict(self) -> dict[str, Any]:
         d = PipeCommand._as_dict(self)
         d.update(author=self.author, content_hash=self.content_hash)
+        return d
+
+
+@dataclass(slots=True)
+class HookCommentCommand(PipeCommand):
+    """Queue a comment for injection via the hook (does not call function directly)."""
+    sns_id: str = ""
+    content: str = ""
+    reply_to: str = ""
+    cmd: str = field(default="hook_comment", init=False)
+
+    def _as_dict(self) -> dict[str, Any]:
+        d = PipeCommand._as_dict(self)
+        d.update(sns_id=self.sns_id, content=self.content, reply_to=self.reply_to)
+        return d
+
+
+@dataclass(slots=True)
+class GetLatestSnsIdCommand(PipeCommand):
+    cmd: str = field(default="get_latest_sns_id", init=False)
+
+
+@dataclass(slots=True)
+class BatchCommentCommand(PipeCommand):
+    """Send multiple comments concurrently via DLL thread pool."""
+    sns_id: str = ""
+    comments: list[str] = field(default_factory=list)
+    reply_to: str = ""
+    concurrency: int = 10
+    cmd: str = field(default="batch_comment", init=False)
+
+    def _as_dict(self) -> dict[str, Any]:
+        d = PipeCommand._as_dict(self)
+        d.update(
+            sns_id=self.sns_id,
+            comments=self.comments,
+            reply_to=self.reply_to,
+            concurrency=self.concurrency,
+        )
+        return d
+
+
+@dataclass(slots=True)
+class StatusCommand(PipeCommand):
+    cmd: str = field(default="status", init=False)
+
+
+@dataclass(slots=True)
+class ReadMemoryCommand(PipeCommand):
+    """Read N bytes from Weixin.dll base + rva (for crash-site disassembly)."""
+    rva: int = 0
+    size: int = 64
+    cmd: str = field(default="read_memory", init=False)
+
+    def _as_dict(self) -> dict[str, Any]:
+        d = PipeCommand._as_dict(self)
+        d.update(rva=self.rva, size=self.size)
+        return d
+
+
+@dataclass(slots=True)
+class TlsDiagCommand(PipeCommand):
+    """Collect implicit TLS and FLS diagnostics."""
+    cmd: str = field(default="tls_diag", init=False)
+
+
+@dataclass(slots=True)
+class ParallelCommentCommand(PipeCommand):
+    """Send multiple comments in parallel with TLS context copy."""
+    sns_id: str = ""
+    comments: list[str] = field(default_factory=list)
+    reply_to: str = ""
+    max_concurrency: int = 10
+    tls_mode: str = "implicit"
+    cmd: str = field(default="parallel_comment", init=False)
+
+    def _as_dict(self) -> dict[str, Any]:
+        d = PipeCommand._as_dict(self)
+        d.update(
+            sns_id=self.sns_id,
+            comments=self.comments,
+            reply_to=self.reply_to,
+            max_concurrency=self.max_concurrency,
+            tls_mode=self.tls_mode,
+        )
+        return d
+
+
+@dataclass
+class PiggybackCommentCommand(PipeCommand):
+    """Queue comments for piggyback execution inside next hook callback."""
+    sns_id: str = ""
+    comments: list[str] = field(default_factory=list)
+    reply_to: str = ""
+    max_concurrency: int = 10
+    timeout_ms: int = 30000
+    cmd: str = field(default="piggyback_comment", init=False)
+
+    def _as_dict(self) -> dict[str, Any]:
+        d = PipeCommand._as_dict(self)
+        d.update(
+            sns_id=self.sns_id,
+            comments=self.comments,
+            reply_to=self.reply_to,
+            max_concurrency=self.max_concurrency,
+            timeout_ms=self.timeout_ms,
+        )
         return d
 
 
@@ -141,6 +260,20 @@ class CommentResult:
     latency_ms: int = 0
     error_code: int = 0
     error_message: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Batch comment result (returned by batch operations)
+# ---------------------------------------------------------------------------
+
+@dataclass(slots=True)
+class BatchCommentResult:
+    """Result of a batch comment attempt via DLL."""
+    total: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    total_latency_ms: int = 0
+    results: list[CommentResult] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

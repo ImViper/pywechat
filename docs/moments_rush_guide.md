@@ -1,5 +1,21 @@
 # 朋友圈自动抢答全流程指南
 
+> 更新时间：2026-02-10
+> 当前版本说明：评论发送已支持 Hook + UI 混合路径，默认策略为 Hook 优先、失败回退 UI。
+
+## 0. 快速理解（先看这个）
+
+1. 端到端流程图：`docs/hook_flow_overview.md`
+2. Hook 架构与接口：`docs/hook_comment_research.md`
+3. 当前阶段进度：`docs/hook_progress.md`
+
+当前评论发送通道：
+
+1. `PYWEIXIN_HOOK_ENABLED=1` 时，`moments_ext` 会接入 `CommentDispatcher`（Hook 优先）。
+2. Hook 不可用或调用失败时，会自动回退 `comment_flow` UI 自动化。
+3. 当前流式路径仍按答案逐条发送；批量并发能力已实现，但主流程尚未默认启用。
+4. DLL 侧已支持 `piggyback_comment`（回调期批量执行），最新实测可实现 10/10 成功。
+
 ## 1. 环境准备
 
 1. Windows + PC 微信已登录。

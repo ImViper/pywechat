@@ -13,6 +13,9 @@ from pyweixin.hook_types import (
     PingCommand,
     PipeResponse,
     QuerySnsIdCommand,
+    ReadMemoryCommand,
+    ParallelCommentCommand,
+    TlsDiagCommand,
     VersionCommand,
     PROTOCOL_VERSION,
 )
@@ -49,6 +52,22 @@ class TestPipeCommands:
         assert d["sns_id"] == "12345"
         assert d["content"] == "5男"
         assert d["reply_to"] == ""
+        assert d["allow_queue_fallback"] is False
+        assert d["prefer_arg1_template"] is True
+        assert d["execution_mode"] == "pipe_thread"
+        assert d["wait_timeout_ms"] == 1500
+
+    def test_comment_json_with_queue_fallback(self):
+        cmd = CommentCommand(
+            sns_id="12345",
+            content="ok",
+            reply_to="",
+            allow_queue_fallback=True,
+        )
+        d = json.loads(cmd.to_json())
+        assert d["allow_queue_fallback"] is True
+        assert d["prefer_arg1_template"] is True
+        assert d["execution_mode"] == "pipe_thread"
 
     def test_query_sns_id_json(self):
         cmd = QuerySnsIdCommand(author="小蔡", content_hash="fp_abc")
@@ -102,3 +121,50 @@ class TestCommentResult:
         assert r.method == "hook"
         assert r.latency_ms == 50
         assert r.error_code == 0
+
+
+class TestReadMemoryCommand:
+    def test_json(self):
+        cmd = ReadMemoryCommand(rva=0x3c5c70, size=128)
+        d = json.loads(cmd.to_json())
+        assert d["cmd"] == "read_memory"
+        assert d["rva"] == 0x3c5c70
+        assert d["size"] == 128
+
+    def test_defaults(self):
+        cmd = ReadMemoryCommand()
+        d = json.loads(cmd.to_json())
+        assert d["rva"] == 0
+        assert d["size"] == 64
+
+
+class TestParallelCommentCommand:
+    def test_json(self):
+        cmd = ParallelCommentCommand(
+            sns_id="q123",
+            comments=["a", "b", "c"],
+            reply_to="",
+            max_concurrency=5,
+            tls_mode="both",
+        )
+        d = json.loads(cmd.to_json())
+        assert d["cmd"] == "parallel_comment"
+        assert d["sns_id"] == "q123"
+        assert d["comments"] == ["a", "b", "c"]
+        assert d["max_concurrency"] == 5
+        assert d["tls_mode"] == "both"
+
+    def test_defaults(self):
+        cmd = ParallelCommentCommand()
+        d = json.loads(cmd.to_json())
+        assert d["comments"] == []
+        assert d["max_concurrency"] == 10
+        assert d["tls_mode"] == "implicit"
+
+
+class TestTlsDiagCommand:
+    def test_json(self):
+        cmd = TlsDiagCommand()
+        d = json.loads(cmd.to_json())
+        assert d["cmd"] == "tls_diag"
+        assert d["v"] == PROTOCOL_VERSION

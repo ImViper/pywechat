@@ -10,6 +10,8 @@
  */
 
 #include <Windows.h>
+#include <objbase.h>
+#include <atomic>
 #include <thread>
 
 #include <spdlog/spdlog.h>
@@ -18,9 +20,10 @@
 #include "pipe_server.h"
 #include "hook_manager.h"
 #include "version_check.h"
+#include "sns_comment.h"
 
 static std::thread g_init_thread;
-static bool g_running = false;
+static std::atomic<bool> g_running{false};
 
 static void init_routine() {
     try {
@@ -36,13 +39,33 @@ static void init_routine() {
         auto ver = pywechat::get_wechat_version();
         spdlog::info("WeChat version: {}", ver);
 
-        // Initialize hook manager
+        // Initialize hook manager (MinHook lifecycle)
         pywechat::HookManager::instance().init();
 
+        // Locate comment function via signature scan + install hook
+        if (pywechat::init_sns_comment()) {
+            if (pywechat::install_comment_hook()) {
+                spdlog::info("comment hook installed");
+            } else {
+                spdlog::warn("comment hook install failed, direct-call only");
+            }
+        } else {
+            spdlog::warn("sns_comment init failed, comment feature unavailable");
+        }
+
         // Start pipe server (blocks until g_running == false)
-        g_running = true;
+        g_running.store(true);
         pywechat::PipeServer server;
+
+        // COM init for pipe server thread — WeChat internal functions may
+        // depend on COM being initialised on the calling thread (STA).
+        HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+        bool com_ok = SUCCEEDED(hr);
+        spdlog::info("COM init on pipe thread: {} (hr={:#x})", com_ok ? "ok" : "failed", (unsigned)hr);
+
         server.run(g_running);
+
+        if (com_ok) CoUninitialize();
 
         spdlog::info("pipe server stopped, cleaning up");
     } catch (const std::exception& ex) {
@@ -59,7 +82,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
         break;
 
     case DLL_PROCESS_DETACH:
-        g_running = false;
+        g_running.store(false);
+        pywechat::uninstall_comment_hook();
         pywechat::HookManager::instance().cleanup();
         spdlog::info("pywechat_hook unloaded");
         spdlog::shutdown();

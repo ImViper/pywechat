@@ -28,6 +28,7 @@ except ImportError:
 
 
 def find_wechat_pid():
+    """找到加载了 Weixin.dll 的主微信进程."""
     if psutil is None:
         raise RuntimeError("psutil not installed, specify --pid manually")
     candidates = []
@@ -36,7 +37,13 @@ def find_wechat_pid():
             candidates.append(p)
     if not candidates:
         raise RuntimeError("WeChat process not found")
-    # Pick the oldest one (main process)
+    for p in candidates:
+        try:
+            for m in p.memory_maps():
+                if 'weixin.dll' in m.path.lower():
+                    return p.pid
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
     candidates.sort(key=lambda p: p.info['create_time'])
     return candidates[0].pid
 

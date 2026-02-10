@@ -6,10 +6,11 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pyweixin.hook_types import CommentResult, HookErrorCode
+from pyweixin.hook_types import CommentResult, HookErrorCode, PipeResponse
 from pyweixin.comment_dispatcher import (
     CircuitBreakerState,
     CommentDispatcher,
+    HookCommentSender,
 )
 
 
@@ -49,6 +50,46 @@ class MockUISender:
     @property
     def call_count(self):
         return self._call_count
+
+
+class MockBridge:
+    def __init__(self, *, query_ok=False, latest_ok=False, sns_id="q123"):
+        self.query_ok = query_ok
+        self.latest_ok = latest_ok
+        self.sns_id = sns_id
+        self.last_send_sns_id = None
+        self.last_send_kwargs = {}
+
+    def query_sns_id(self, author, content_hash):
+        if self.query_ok:
+            return PipeResponse(ok=True, data={"sns_id": self.sns_id})
+        return PipeResponse(ok=False, error_code=HookErrorCode.SNS_ID_NOT_FOUND)
+
+    def get_latest_sns_id(self):
+        if self.latest_ok:
+            return PipeResponse(ok=True, data={"sns_id": self.sns_id})
+        return PipeResponse(ok=False, error_code=HookErrorCode.SNS_ID_NOT_FOUND)
+
+    def send_comment(
+        self,
+        content,
+        *,
+        sns_id="",
+        reply_to="",
+        allow_queue_fallback=False,
+        prefer_arg1_template=True,
+        execution_mode="pipe_thread",
+        wait_timeout_ms=1500,
+    ):
+        self.last_send_sns_id = sns_id
+        self.last_send_kwargs = {
+            "reply_to": reply_to,
+            "allow_queue_fallback": allow_queue_fallback,
+            "prefer_arg1_template": prefer_arg1_template,
+            "execution_mode": execution_mode,
+            "wait_timeout_ms": wait_timeout_ms,
+        }
+        return PipeResponse(ok=True, error_code=0, latency_ms=5, data={})
 
 
 # ---------------------------------------------------------------------------
@@ -148,3 +189,26 @@ class TestCommentDispatcher:
         result = d.post_comment("hello")
         assert result.success is True
         assert result.method == "ui"
+
+
+class TestHookCommentSender:
+    def test_fallback_to_latest_sns_id(self):
+        bridge = MockBridge(query_ok=False, latest_ok=True, sns_id="q_latest")
+        sender = HookCommentSender(bridge)
+        r = sender.send_comment("hello", author="a", content_hash="h")
+        assert r.success is True
+        assert bridge.last_send_sns_id == "q_latest"
+
+    def test_query_hit_priority_over_latest(self):
+        bridge = MockBridge(query_ok=True, latest_ok=True, sns_id="q_query")
+        sender = HookCommentSender(bridge)
+        r = sender.send_comment("hello", author="a", content_hash="h")
+        assert r.success is True
+        assert bridge.last_send_sns_id == "q_query"
+
+    def test_default_execution_mode_is_capture_thread(self):
+        bridge = MockBridge(query_ok=True, latest_ok=True, sns_id="q_query")
+        sender = HookCommentSender(bridge)
+        sender.send_comment("hello", author="a", content_hash="h")
+        assert bridge.last_send_kwargs["execution_mode"] == "capture_thread"
+        assert bridge.last_send_kwargs["wait_timeout_ms"] == 400

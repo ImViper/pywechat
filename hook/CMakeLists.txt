@@ -10,7 +10,7 @@ include(FetchContent)
 # MinHook - lightweight API hooking library
 FetchContent_Declare(
     minhook
-    GIT_REPOSITORY https://github.com/TsudaKageworku/minhook.git
+    GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
     GIT_TAG        master
 )
 
@@ -46,6 +46,8 @@ target_link_libraries(pywechat_hook PRIVATE
     minhook
     nlohmann_json::nlohmann_json
     spdlog::spdlog
+    ole32
+    user32
 )
 
 # Windows-specific: export nothing by default, DllMain is the entry point

@@ -114,6 +114,35 @@ local_workspace/         # 本地工作区（已 gitignore，不入库）
 - 对 upstream 文件的 bug fix 必须在 message 中标注，例如：`fix: WeChatTools.is_sns_at_bottom null check`。
 - 推送前将开发分支 squash 为尽量少的 commit。
 
+## Hook DLL 开发流程
+
+### 构建 → 注入 → 测试的标准流程
+
+**每次测试前必须按以下顺序操作，不可跳步：**
+
+1. **Kill 微信** — `cmd.exe /c "taskkill /F /IM Weixin.exe"`，等待 2-3 秒
+2. **确认进程已清除** — `tasklist | grep Weixin`，如果还有残留（僵尸进程，内存 <100KB，status=stopped）可以忽略
+3. **启动微信** — `cmd.exe /c start "" "C:\Program Files\Tencent\Weixin\Weixin.exe"`，等待 5 秒让主进程完全初始化
+4. **确认主进程就绪** — 检查 Weixin.exe 进程内存 >100MB 的那个才是主进程
+5. **注入 DLL** — `python -c "from pyweixin.hook_injector import ...; inject_dll(pid, dll_path)"`
+6. **等待 pipe server 启动** — sleep 2 秒后再连接 pipe
+7. **验证连接** — `HookBridge.connect()` + `status()`
+
+### Eject 失败的处理
+
+`eject_dll()` 经常失败（DLL 文件被锁定），**不要反复重试 eject**。正确做法：
+- 直接关闭微信（kill 进程）
+- 重新构建 DLL（此时文件不再被锁定）
+- 重新启动微信 → 注入
+
+### 构建 DLL
+
+```bash
+cd H:/Code/pywechat/hook/build && cmake --build . --config Release
+```
+
+DLL 输出路径：`hook/build/bin/Release/pywechat_hook.dll`
+
 ## 文档维护
 
 - 功能架构、运行方式、优化记录写在 `docs/moments_rush_guide.md`。

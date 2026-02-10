@@ -47,9 +47,13 @@ local_workspace/
 
 # Hook DLL build artifacts
 hook/build/
+hook/build*/
 *.dll
 pywechat_hook.log
 
 # Hook reverse engineering tool outputs
 hook/tools/hook_candidates_log.txt
 hook/tools/rtti_results.json
+hook/tools/verify_log.txt
+hook/tools/deep_probe_log.txt
+hook/tools/poc_log.txt

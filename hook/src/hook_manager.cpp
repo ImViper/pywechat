@@ -24,20 +24,8 @@ void HookManager::init() {
     spdlog::info("MinHook initialized");
     initialized_ = true;
 
-    /*
-     * TODO(reverse): Install hooks here.
-     *
-     * Example: hook the SNS timeline refresh function to capture sns_id
-     * mappings as posts are loaded.
-     *
-     * auto addr = SigScanner::find("WeChatWin.dll", SNS_TIMELINE_SIG);
-     * if (addr) {
-     *     MH_CreateHook(reinterpret_cast<LPVOID>(addr),
-     *                   &hooked_sns_timeline,
-     *                   reinterpret_cast<LPVOID*>(&orig_sns_timeline));
-     *     MH_EnableHook(reinterpret_cast<LPVOID>(addr));
-     * }
-     */
+    // Hook installation is handled by dllmain.cpp (init_sns_comment + install_comment_hook)
+    // after HookManager::init() completes. This ensures MH_Initialize() runs first.
 }
 
 void HookManager::cleanup() {
@@ -68,6 +56,17 @@ std::string HookManager::lookup_sns_id(const std::string& author,
         return it->second;
     }
     return "";
+}
+
+void HookManager::cache_latest_sns_id(const std::string& sns_id) {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    latest_sns_id_ = sns_id;
+    spdlog::debug("cached latest sns_id: {}", sns_id);
+}
+
+std::string HookManager::get_latest_sns_id() const {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    return latest_sns_id_;
 }
 
 std::string HookManager::make_cache_key(const std::string& author,

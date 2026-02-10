@@ -33,23 +33,82 @@ INFINITE = 0xFFFFFFFF
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
+# ---------------------------------------------------------------------------
+# Win32 API type declarations (critical for x64 — prevents pointer truncation)
+# ---------------------------------------------------------------------------
+
+SIZE_T = ctypes.c_size_t
+LPVOID = ctypes.c_void_p
+
+kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+kernel32.OpenProcess.restype = wt.HANDLE
+
+kernel32.VirtualAllocEx.argtypes = [wt.HANDLE, LPVOID, SIZE_T, wt.DWORD, wt.DWORD]
+kernel32.VirtualAllocEx.restype = LPVOID
+
+kernel32.WriteProcessMemory.argtypes = [wt.HANDLE, LPVOID, ctypes.c_void_p, SIZE_T, ctypes.POINTER(SIZE_T)]
+kernel32.WriteProcessMemory.restype = wt.BOOL
+
+kernel32.VirtualFreeEx.argtypes = [wt.HANDLE, LPVOID, SIZE_T, wt.DWORD]
+kernel32.VirtualFreeEx.restype = wt.BOOL
+
+kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wt.HMODULE
+
+kernel32.GetProcAddress.argtypes = [wt.HMODULE, ctypes.c_char_p]
+kernel32.GetProcAddress.restype = LPVOID
+
+kernel32.CreateRemoteThread.argtypes = [wt.HANDLE, LPVOID, SIZE_T, LPVOID, LPVOID, wt.DWORD, ctypes.POINTER(wt.DWORD)]
+kernel32.CreateRemoteThread.restype = wt.HANDLE
+
+kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+kernel32.WaitForSingleObject.restype = wt.DWORD
+
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.CloseHandle.restype = wt.BOOL
+
 
 # ---------------------------------------------------------------------------
 # Find WeChat main process (mirrors upstream WeChatTools logic)
 # ---------------------------------------------------------------------------
 
+def _pick_best_pid(candidates: list[dict]) -> Optional[int]:
+    """Pick the best candidate PID from collected process infos."""
+    if not candidates:
+        return None
+
+    def score(info: dict) -> tuple[int, int, float, int]:
+        status = str(info.get("status") or "")
+        # Prefer active processes; if all are stopped, still return one.
+        active = 0 if status in {"stopped", "zombie", "dead"} else 1
+        has_cmdline = 1 if info.get("cmdline") else 0
+        create_time = float(info.get("create_time") or 0.0)
+        pid = int(info.get("pid") or 0)
+        return (active, has_cmdline, create_time, pid)
+
+    return max(candidates, key=score).get("pid")
+
+
 def find_wechat_pid() -> Optional[int]:
-    """Return the PID of the WeChat main process (Weixin.exe, non-child)."""
-    candidates = []
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-        if proc.info["name"] == "Weixin.exe":
-            candidates.append(proc)
-    # Main process has no --type argument in cmdline
-    for proc in candidates:
-        cmdline = proc.info.get("cmdline") or []
-        if not any("--type" in arg for arg in cmdline):
-            return proc.info["pid"]
-    return None
+    """Return the PID of the best WeChat main-process candidate.
+
+    We prefer active non-child Weixin.exe processes (cmdline without --type).
+    If process status reports ``stopped`` for all candidates, we still return
+    the best match instead of returning None.
+    """
+    all_candidates: list[dict] = []
+    main_candidates: list[dict] = []
+
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "status", "create_time"]):
+        info = proc.info
+        if info.get("name") != "Weixin.exe":
+            continue
+        all_candidates.append(info)
+        cmdline = info.get("cmdline") or []
+        if cmdline and not any("--type" in arg for arg in cmdline):
+            main_candidates.append(info)
+
+    return _pick_best_pid(main_candidates) or _pick_best_pid(all_candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -141,18 +200,27 @@ def _find_module_in_process(pid: int, module_name: str) -> Optional[int]:
 
 def _enum_module_base(pid: int, module_name: str) -> Optional[int]:
     """Enumerate loaded modules to find base address of *module_name*."""
-    import ctypes.wintypes as wt2
-
     psapi = ctypes.WinDLL("psapi", use_last_error=True)
+
+    # Declare argtypes for 64-bit safety
+    psapi.EnumProcessModulesEx.argtypes = [
+        wt.HANDLE, ctypes.POINTER(ctypes.c_void_p), wt.DWORD,
+        ctypes.POINTER(wt.DWORD), wt.DWORD,
+    ]
+    psapi.EnumProcessModulesEx.restype = wt.BOOL
+    psapi.GetModuleBaseNameW.argtypes = [
+        wt.HANDLE, ctypes.c_void_p, ctypes.c_wchar_p, wt.DWORD,
+    ]
+    psapi.GetModuleBaseNameW.restype = wt.DWORD
 
     h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
     if not h_process:
         return None
     try:
         h_mods = (ctypes.c_void_p * 1024)()
-        cb_needed = wt2.DWORD()
+        cb_needed = wt.DWORD()
         if not psapi.EnumProcessModulesEx(
-            h_process, ctypes.byref(h_mods), ctypes.sizeof(h_mods),
+            h_process, h_mods, ctypes.sizeof(h_mods),
             ctypes.byref(cb_needed), 0x03  # LIST_MODULES_ALL
         ):
             return None
