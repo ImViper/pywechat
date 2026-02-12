@@ -18,39 +18,34 @@ Phase 0: Route B 去风险实验 - 时间对比测试
 """
 
 import os
-import re
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 from pyweixin.WeChatTools import Navigator, Desktop, Tools
 from pyweixin.Uielements import Windows, Lists
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+from scripts.hook_log_utils import extract_timestamps_ms, resolve_log_path
+
 desktop = Desktop(backend='uia')
 
+LOG_PATH = resolve_log_path(project_root=PROJECT_ROOT)
 
-def parse_dll_log_timestamps(log_path: str = "pywechat_hook.log") -> list[int]:
+
+def parse_dll_log_timestamps(log_path: Path = LOG_PATH) -> list[int]:
     """解析 DLL log，提取 [SNS_POC] 回调触发的时间戳（毫秒）"""
-    timestamps = []
-
-    if not os.path.exists(log_path):
+    if not log_path.exists():
         print(f"[WARNING] DLL log not found at: {log_path}")
-        return timestamps
+        return []
 
     # 读取最后 500 行（避免读取整个文件）
-    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
         recent_lines = lines[-500:] if len(lines) > 500 else lines
-
-    # 提取 [SNS_POC] Timestamp: 1234567890 ms
-    pattern = re.compile(r'\[SNS_POC\] Timestamp: (\d+) ms')
-
-    for line in recent_lines:
-        match = pattern.search(line)
-        if match:
-            ts = int(match.group(1))
-            timestamps.append(ts)
-
-    return timestamps
+    return extract_timestamps_ms(recent_lines)
 
 
 def wait_for_first_post_visible(moments_window, timeout: float = 10.0) -> tuple[int, str]:
@@ -124,13 +119,14 @@ def run_single_test(moments_window, test_num: int) -> dict:
     print(f"Test #{test_num}")
     print(f"{'='*60}")
 
-    # 记录测试开始时间（用于筛选 DLL log）
+    # 记录已有回调时间戳数量，避免误用历史日志。
+    existing_timestamps = parse_dll_log_timestamps()
+    existing_count = len(existing_timestamps)
+
+    input("[INSTRUCTION] 按 Enter 后，请立即手动下拉刷新朋友圈...")
     test_start_ms = int(time.time() * 1000)
 
-    input("[INSTRUCTION] 请手动下拉刷新朋友圈，然后按 Enter 继续...")
-
     # 开始轮询 UI
-    refresh_trigger_time = time.time()
     ui_ts_ms, content_preview = wait_for_first_post_visible(moments_window, timeout=15.0)
 
     if ui_ts_ms == 0:
@@ -159,19 +155,24 @@ def run_single_test(moments_window, test_num: int) -> dict:
             'error': 'No DLL callback detected'
         }
 
-    # 找到最接近 test_start_ms 之后的时间戳
-    recent_ts = [ts for ts in dll_timestamps if ts >= test_start_ms]
+    # 仅看本轮新增日志，再按时间过滤。
+    new_timestamps = dll_timestamps[existing_count:]
+    recent_ts = [ts for ts in new_timestamps if ts >= test_start_ms]
 
     if not recent_ts:
-        print("[ERROR] DLL log 中没有本次测试的时间戳")
-        return {
-            'test_num': test_num,
-            'success': False,
-            'error': 'No matching DLL timestamp'
-        }
+        fallback_ts = [ts for ts in dll_timestamps if ts >= test_start_ms]
+        if not fallback_ts:
+            print("[ERROR] DLL log 中没有本次测试的时间戳")
+            return {
+                'test_num': test_num,
+                'success': False,
+                'error': 'No matching DLL timestamp'
+            }
+        recent_ts = fallback_ts
+        print("[WARNING] 未定位到本轮新增时间戳，回退使用全量日志过滤结果")
 
-    # 假设最新的时间戳就是本次回调
-    hook_ts_ms = recent_ts[-1]
+    # 使用本轮最早触发的回调，避免选到后续噪声回调。
+    hook_ts_ms = recent_ts[0]
     hook_latency = (hook_ts_ms - test_start_ms) / 1000.0
 
     print(f"[HOOK_CALLBACK] T={hook_latency:.2f}s (from DLL log)")

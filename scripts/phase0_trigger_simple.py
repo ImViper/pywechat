@@ -9,6 +9,7 @@ import time
 import os
 import re
 from pathlib import Path
+from pathlib import Path
 
 # 设置 UTF-8 输出
 if sys.platform == 'win32':
@@ -17,7 +18,11 @@ if sys.platform == 'win32':
     except:
         pass
 
-LOG_PATH = r"C:\Program Files\Tencent\Weixin\4.1.7.30\pywechat_hook.log"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+from hook_log_utils import resolve_log_path
+
+LOG_PATH = str(resolve_log_path(project_root=PROJECT_ROOT))
 
 def get_log_size():
     if os.path.exists(LOG_PATH):

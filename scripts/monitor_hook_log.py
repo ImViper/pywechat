@@ -6,8 +6,14 @@
 
 import time
 import os
+import sys
+from pathlib import Path
 
-LOG_PATH = r"C:\Program Files\Tencent\Weixin\4.1.7.30\pywechat_hook.log"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+from hook_log_utils import resolve_log_path
+
+LOG_PATH = str(resolve_log_path(project_root=PROJECT_ROOT))
 
 def tail_log(filepath, num_lines=10):
     """读取文件最后 N 行"""

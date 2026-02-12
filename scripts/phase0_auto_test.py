@@ -20,7 +20,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 HOOK_BUILD_DIR = PROJECT_ROOT / "hook" / "build"
 DLL_PATH = HOOK_BUILD_DIR / "bin" / "Release" / "pywechat_hook.dll"
-LOG_PATH = PROJECT_ROOT / "pywechat_hook.log"
+
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+from hook_log_utils import resolve_log_path
+
+LOG_PATH = resolve_log_path(project_root=PROJECT_ROOT)
 
 
 def run_command(cmd: str, cwd: Path = None, shell: bool = True) -> bool:
@@ -302,7 +306,7 @@ def main():
             print("\n可能原因：")
             print("  1. 函数签名不正确（需要从 IDA Pro 提取）")
             print("  2. WeChat 版本不匹配")
-            print("\n请检查日志：tail -f pywechat_hook.log")
+            print(f"\n请检查日志：{LOG_PATH}")
 
 
 if __name__ == '__main__':
