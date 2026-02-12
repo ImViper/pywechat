@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <objbase.h>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -61,7 +62,7 @@ namespace pywechat {
  *
  * ===== Phase 2-4: 静态/动态分析 =====
  *
- *   详见 docs/hook_progress.md
+ *   详见 docs/hook/hook_progress.md
  *
  *   最佳 Hook 点: cgi_A_caller_2 (RVA 0x049e9240)
  *   结构体布局: 见 sns_comment.h SnsCommentRequestData
@@ -125,6 +126,7 @@ static const uintptr_t COMMENT_FN_RVA = 0x049e9240;  // cgi_A_caller_2
 static const uintptr_t TOP_FN_RVA     = 0x049bdc10;  // cgi_A_caller_3_TOP
 static const uintptr_t VTABLE_RVA     = 0x0859e6d8;
 static const uintptr_t TLS_ACCESSOR_RVA = 0x00b91e90; // TLS accessor (crash root cause)
+static const uintptr_t ARG1_CTX_HELPER_RVA = 0x003c5970; // checks arg1->+0x368 before crash path
 
 // =====================================================================
 // MSVC std::string 内存布局辅助函数 (匹配 Frida PoC)
@@ -150,7 +152,8 @@ static constexpr size_t OFF_COMMENT_KEY  = 0xA0;
 // that the internal function reads but never writes).
 static constexpr size_t REQUEST_CALL_BUFFER_SIZE = 0x400;
 static constexpr uint64_t CONTEXT_FRESHNESS_MS = 2000;
-static constexpr size_t ARG1_TEMPLATE_SIZE = 0x200;
+// Must cover +0x368 which is read in the internal call chain.
+static constexpr size_t ARG1_TEMPLATE_SIZE = 0x400;
 
 /// Read a MSVC std::string from raw memory (safe, no CRT dependency)
 static std::string read_msvc_string(const uint8_t* base) {
@@ -220,13 +223,21 @@ typedef void* (__fastcall *fn_SnsCommentSubmit)(
     void* arg3        // 观测值: Weixin.dll 内地址 (回调函数?)
 );
 
+// Internal TLS accessor around RVA 0x00b91e90 (returns context pointer).
+typedef void* (__fastcall *fn_TlsAccessor)(int slot);
+typedef void* (__fastcall *fn_Arg1CtxHelper)(void* arg1, void* a2, void* a3, void* a4);
+
 // 原始函数地址 (通过 SigScanner 找到)
 static uintptr_t g_target_fn_addr = 0;
 static uintptr_t g_top_fn_addr = 0;  // cgi_A_caller_3_TOP
+static uintptr_t g_tls_accessor_addr = 0;
+static uintptr_t g_arg1_ctx_helper_addr = 0;
 
 // MinHook trampoline: 调用原始函数
 static fn_SnsCommentSubmit g_original_fn = nullptr;
 static fn_SnsCommentSubmit g_original_top_fn = nullptr;
+static fn_TlsAccessor g_original_tls_accessor = nullptr;
+static fn_Arg1CtxHelper g_original_arg1_ctx_helper = nullptr;
 
 // =====================================================================
 // 运行时状态捕获 (首次合法调用时自动捕获)
@@ -350,14 +361,43 @@ static std::shared_ptr<CaptureThreadDirectJob> pop_next_capture_thread_job() {
     return job;
 }
 
+// Capture-thread message hook: allows actively waking capture thread
+// to process queued direct-call jobs without waiting for next comment callback.
+static std::mutex g_capture_msg_hook_mutex;
+static HHOOK g_capture_msg_hook = nullptr;
+static DWORD g_capture_msg_hook_tid = 0;
+static constexpr UINT WM_PYWECHAT_CAPTURE_TICK = WM_APP + 0x337;
+
 // =====================================================================
 // Hook 安装状态
 // =====================================================================
 
 static bool g_hook_installed = false;
 static bool g_hook_top_installed = false;
+static bool g_tls_accessor_hook_installed = false;
+static bool g_arg1_ctx_helper_hook_installed = false;
 static volatile int g_hook_hit_count = 0;       // total hook callbacks
 static volatile int g_hook_top_hit_count = 0;    // total TOP hook callbacks
+
+// Captured TLS accessor return from capture thread.
+static void* g_capture_tls_accessor_value = nullptr;
+static bool g_capture_tls_accessor_ready = false;
+static std::atomic<int> g_tls_accessor_capture_hits{0};
+std::atomic<int> g_tls_accessor_override_hits{0};  // Exposed to pipe_server for status
+std::atomic<int> g_tls_accessor_worker_miss{0};    // Exposed to pipe_server for status
+static std::atomic<int> g_arg1_ctx_patch_hits{0};
+// Kill switch for TLS override (can be disabled via pipe config).
+// NOTE: TLS override is disabled by default because cgi_A_caller_2 is not thread-safe.
+// Concurrent execution (concurrency >= 2) causes crashes regardless of TLS override setting.
+// Use concurrency=1 (serial mode) for stable operation.
+bool g_tls_override_enabled = false;
+// Capture-thread implicit TLS block +0x358 fallback context (for parallel workers).
+static uint64_t g_capture_tls_slot_0x358_raw = 0;
+static uintptr_t g_capture_tls_slot_0x358_ptr = 0;
+static bool g_capture_tls_slot_0x358_ready = false;
+
+// Worker-scope switch: only override TLS accessor on piggyback parallel workers.
+static thread_local bool t_piggyback_parallel_worker = false;
 
 // =====================================================================
 // Cached request->+0x368 value (set by g_original_fn on capture thread)
@@ -383,9 +423,356 @@ static bool safe_copy_bytes(void* dst, const void* src, size_t n) {
     }
 }
 
+static bool looks_like_user_pointer(void* ptr) {
+    const uintptr_t v = reinterpret_cast<uintptr_t>(ptr);
+    if (v < 0x10000 || v > 0x00007FFFFFFFFFFFULL) {
+        return false;
+    }
+    uint8_t probe[8] = {};
+    return safe_copy_bytes(probe, ptr, sizeof(probe));
+}
+
+// Decode possible tagged pointers (raw / clear low 1/2/4 bits).
+// Weixin frequently stores pointer-like values with low-bit flags.
+static bool decode_tagged_pointer(uint64_t raw, uintptr_t* out_ptr, int* out_tag_bits) {
+    static constexpr uint64_t kMasks[] = {
+        0xFFFFFFFFFFFFFFFFULL,
+        ~0x1ULL,
+        ~0x3ULL,
+        ~0xFULL
+    };
+    static constexpr int kTagBits[] = {0, 1, 2, 4};
+
+    for (size_t i = 0; i < (sizeof(kMasks) / sizeof(kMasks[0])); ++i) {
+        uintptr_t candidate = static_cast<uintptr_t>(raw & kMasks[i]);
+        if (!candidate) {
+            continue;
+        }
+        if (looks_like_user_pointer(reinterpret_cast<void*>(candidate))) {
+            if (out_ptr) {
+                *out_ptr = candidate;
+            }
+            if (out_tag_bits) {
+                *out_tag_bits = kTagBits[i];
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool is_in_weixin_module(uintptr_t ptr) {
+    HMODULE hmod = GetModuleHandleA("Weixin.dll");
+    if (!hmod) {
+        hmod = GetModuleHandleA("WeChatWin.dll");
+    }
+    if (!hmod) {
+        return false;
+    }
+    auto base = reinterpret_cast<uintptr_t>(hmod);
+    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(hmod);
+    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    auto end = base + nt->OptionalHeader.SizeOfImage;
+    return ptr >= base && ptr < end;
+}
+
+static bool is_executable_address(uintptr_t ptr) {
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery(reinterpret_cast<LPCVOID>(ptr), &mbi, sizeof(mbi)) == 0) {
+        return false;
+    }
+    const DWORD prot = (mbi.Protect & 0xFF);
+    switch (prot) {
+    case PAGE_EXECUTE:
+    case PAGE_EXECUTE_READ:
+    case PAGE_EXECUTE_READWRITE:
+    case PAGE_EXECUTE_WRITECOPY:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static std::atomic<int> g_ctx_container_probe_hits{0};
+static std::atomic<int> g_ctx_object_fingerprint_hits{0};
+
+static void log_ctx_object_fingerprint(void* obj_ptr, const char* tag) {
+    if (!obj_ptr) {
+        return;
+    }
+    int hit = ++g_ctx_object_fingerprint_hits;
+    if (hit > 24) {
+        return;
+    }
+    uintptr_t obj = reinterpret_cast<uintptr_t>(obj_ptr);
+    uintptr_t vtbl = 0;
+    uintptr_t fn0 = 0, fn1 = 0, fn2 = 0, fn3 = 0;
+    safe_copy_bytes(&vtbl, reinterpret_cast<void*>(obj), sizeof(vtbl));
+    if (vtbl) {
+        safe_copy_bytes(&fn0, reinterpret_cast<void*>(vtbl + 0x00), sizeof(fn0));
+        safe_copy_bytes(&fn1, reinterpret_cast<void*>(vtbl + 0x08), sizeof(fn1));
+        safe_copy_bytes(&fn2, reinterpret_cast<void*>(vtbl + 0x10), sizeof(fn2));
+        safe_copy_bytes(&fn3, reinterpret_cast<void*>(vtbl + 0x18), sizeof(fn3));
+    }
+    spdlog::info(
+        "ctx fp#{} ({}) obj={:#x} vtbl={:#x} fns=[{:#x},{:#x},{:#x},{:#x}]",
+        hit,
+        tag ? tag : "unknown",
+        obj,
+        vtbl,
+        fn0,
+        fn1,
+        fn2,
+        fn3);
+}
+
+static bool looks_like_vtable_object(void* obj_ptr) {
+    if (!obj_ptr || !looks_like_user_pointer(obj_ptr)) {
+        return false;
+    }
+    uintptr_t vtbl = 0;
+    if (!safe_copy_bytes(&vtbl, obj_ptr, sizeof(vtbl))) {
+        return false;
+    }
+    if (!looks_like_user_pointer(reinterpret_cast<void*>(vtbl)) ||
+        !is_in_weixin_module(vtbl)) {
+        return false;
+    }
+    int exec_hits = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        uintptr_t fn = 0;
+        if (!safe_copy_bytes(&fn, reinterpret_cast<void*>(vtbl + i * sizeof(uintptr_t)), sizeof(fn))) {
+            continue;
+        }
+        if (looks_like_user_pointer(reinterpret_cast<void*>(fn)) &&
+            is_in_weixin_module(fn) &&
+            is_executable_address(fn)) {
+            exec_hits++;
+        }
+    }
+    return exec_hits >= 2;
+}
+
+static void log_ctx_container_probe(uintptr_t container_ptr, const char* source) {
+    int hit = ++g_ctx_container_probe_hits;
+    if (hit > 8) {
+        return;
+    }
+    spdlog::info("ctx probe #{} ({}) container={:#x}",
+                 hit, source ? source : "unknown", container_ptr);
+    for (size_t off = 0; off <= 0x80; off += 8) {
+        uint64_t raw = 0;
+        if (!safe_copy_bytes(&raw, reinterpret_cast<void*>(container_ptr + off), sizeof(raw))) {
+            continue;
+        }
+        uintptr_t ptr = 0;
+        int tag_bits = 0;
+        bool decoded = decode_tagged_pointer(raw, &ptr, &tag_bits);
+        bool in_weixin = decoded && is_in_weixin_module(ptr);
+        bool vtbl_obj = decoded && looks_like_vtable_object(reinterpret_cast<void*>(ptr));
+        if (!decoded && raw == 0) {
+            continue;
+        }
+        spdlog::info("  +{:#x}: raw={:#x} decoded={} ptr={:#x} tag_bits={} in_weixin={} vtbl_obj={}",
+                     off, raw, decoded, ptr, tag_bits, in_weixin, vtbl_obj);
+
+        if (decoded && looks_like_user_pointer(reinterpret_cast<void*>(ptr)) && off <= 0x80) {
+            for (size_t off2 = 0; off2 <= 0x28; off2 += 8) {
+                uint64_t raw2 = 0;
+                if (!safe_copy_bytes(&raw2, reinterpret_cast<void*>(ptr + off2), sizeof(raw2))) {
+                    continue;
+                }
+                uintptr_t ptr2 = 0;
+                int tag_bits2 = 0;
+                bool decoded2 = decode_tagged_pointer(raw2, &ptr2, &tag_bits2);
+                bool vtbl2 = decoded2 && looks_like_vtable_object(reinterpret_cast<void*>(ptr2));
+                if (!decoded2 && raw2 == 0) {
+                    continue;
+                }
+                spdlog::info("    -> +{:#x}: raw={:#x} decoded={} ptr={:#x} tag_bits={} vtbl_obj={}",
+                             off2, raw2, decoded2, ptr2, tag_bits2, vtbl2);
+            }
+        }
+    }
+}
+
+static bool read_pointer_like_value(uintptr_t addr, uintptr_t* out_ptr, int* out_tag_bits) {
+    uint64_t raw = 0;
+    if (!safe_copy_bytes(&raw, reinterpret_cast<void*>(addr), sizeof(raw))) {
+        return false;
+    }
+    uintptr_t ptr = 0;
+    int tag_bits = 0;
+    if (!decode_tagged_pointer(raw, &ptr, &tag_bits)) {
+        return false;
+    }
+    if (out_ptr) {
+        *out_ptr = ptr;
+    }
+    if (out_tag_bits) {
+        *out_tag_bits = tag_bits;
+    }
+    return true;
+}
+
+// Extract vtable-like object pointer from a context container.
+// Many Weixin internals return a container whose fields hold real object ptrs.
+static void* extract_ctx_object_from_container(uintptr_t container_ptr,
+                                               const char* source,
+                                               uintptr_t* out_field_addr = nullptr,
+                                               int* out_tag_bits = nullptr) {
+    if (!container_ptr || !looks_like_user_pointer(reinterpret_cast<void*>(container_ptr))) {
+        return nullptr;
+    }
+
+    if (looks_like_vtable_object(reinterpret_cast<void*>(container_ptr))) {
+        if (out_field_addr) {
+            *out_field_addr = container_ptr;
+        }
+        if (out_tag_bits) {
+            *out_tag_bits = 0;
+        }
+        return reinterpret_cast<void*>(container_ptr);
+    }
+
+    for (size_t off = 0; off <= 0x120; off += 8) {
+        uintptr_t candidate = 0;
+        int tag_bits = 0;
+        if (!read_pointer_like_value(container_ptr + off, &candidate, &tag_bits)) {
+            continue;
+        }
+        if (looks_like_vtable_object(reinterpret_cast<void*>(candidate))) {
+            if (out_field_addr) {
+                *out_field_addr = container_ptr + off;
+            }
+            if (out_tag_bits) {
+                *out_tag_bits = tag_bits;
+            }
+            spdlog::info(
+                "ctx extract ({}) container={:#x} field=+{:#x} raw_ptr={:#x} tag_bits={}",
+                source ? source : "unknown",
+                container_ptr,
+                off,
+                candidate,
+                tag_bits);
+            log_ctx_object_fingerprint(reinterpret_cast<void*>(candidate), "extract-direct");
+            return reinterpret_cast<void*>(candidate);
+        }
+
+        // One-level indirection: field may point to a helper struct that
+        // contains the real vtable object pointer.
+        for (size_t off2 = 0; off2 <= 0x80; off2 += 8) {
+            uintptr_t nested = 0;
+            int nested_tag_bits = 0;
+            if (!read_pointer_like_value(candidate + off2, &nested, &nested_tag_bits)) {
+                continue;
+            }
+            if (!looks_like_vtable_object(reinterpret_cast<void*>(nested))) {
+                continue;
+            }
+            if (out_field_addr) {
+                *out_field_addr = candidate + off2;
+            }
+            if (out_tag_bits) {
+                *out_tag_bits = nested_tag_bits;
+            }
+            spdlog::info(
+                "ctx extract ({}) container={:#x} field=+{:#x} -> nested=+{:#x} obj={:#x} tag_bits={}",
+                source ? source : "unknown",
+                container_ptr,
+                off,
+                off2,
+                nested,
+                nested_tag_bits);
+            log_ctx_object_fingerprint(reinterpret_cast<void*>(nested), "extract-nested");
+            return reinterpret_cast<void*>(nested);
+        }
+
+    }
+    return nullptr;
+}
+
+static void* normalize_ctx_object_ptr(void* raw_ptr, const char* source) {
+    if (!raw_ptr || !looks_like_user_pointer(raw_ptr)) {
+        return nullptr;
+    }
+    auto container = reinterpret_cast<uintptr_t>(raw_ptr);
+
+    uintptr_t field_addr = 0;
+    int tag_bits = 0;
+    if (void* obj = extract_ctx_object_from_container(
+            container,
+            source,
+            &field_addr,
+            &tag_bits)) {
+        return obj;
+    }
+    for (size_t off = 8; off <= 0x80; off += 8) {
+        uintptr_t shifted = container + off;
+        if (void* obj = extract_ctx_object_from_container(
+                shifted,
+                source,
+                &field_addr,
+                &tag_bits)) {
+            spdlog::info(
+                "normalize ctx object ({}): shifted container raw={:#x} -> +{:#x} field={:#x} tag_bits={}",
+                source ? source : "unknown",
+                container,
+                off,
+                field_addr,
+                tag_bits);
+            return obj;
+        }
+    }
+    spdlog::warn("normalize ctx object ({}): no vtable-like object near {:#x}",
+                 source ? source : "unknown", container);
+    log_ctx_container_probe(container, source);
+    return nullptr;
+}
+
+static bool read_tagged_context_ptr(const uint8_t* base,
+                                    size_t offset,
+                                    void** out_ctx,
+                                    uint64_t* out_raw,
+                                    int* out_tag_bits) {
+    if (!base) {
+        return false;
+    }
+    uint64_t raw = 0;
+    if (!safe_copy_bytes(&raw, base + offset, sizeof(raw))) {
+        return false;
+    }
+    if (out_raw) {
+        *out_raw = raw;
+    }
+    uintptr_t ptr = 0;
+    int tag_bits = 0;
+    if (!decode_tagged_pointer(raw, &ptr, &tag_bits)) {
+        return false;
+    }
+    void* normalized = normalize_ctx_object_ptr(reinterpret_cast<void*>(ptr), "tagged_context");
+    if (!normalized) {
+        return false;
+    }
+    if (out_ctx) {
+        *out_ctx = normalized;
+    }
+    if (out_tag_bits) {
+        *out_tag_bits = tag_bits;
+    }
+    return true;
+}
+
 // Forward declarations (defined later, called from hook callbacks)
 static void collect_capture_fls();
 static void collect_capture_implicit_tls();
+static bool copy_implicit_tls_to_current(uint32_t tls_index, size_t tls_data_size,
+                                         uintptr_t src_block);
+static int copy_tls_slots_to_current();
+static int copy_fls_to_current();
+static int process_capture_thread_jobs(const char* source_tag);
+static bool ensure_capture_thread_msg_hook();
+static void remove_capture_thread_msg_hook();
 
 static std::string make_short_comment_key() {
     // Keep comment_key in SSO to avoid external heap/CRT coupling.
@@ -411,6 +798,7 @@ static int seh_filter(EXCEPTION_POINTERS* ep) {
         HMODULE hmod = GetModuleHandleA("Weixin.dll");
         uintptr_t base = hmod ? (uintptr_t)hmod : 0;
         uintptr_t rva = g_last_seh_address - base;
+
         spdlog::error("SEH exception: code={:#x} addr={:#x} rva={:#x}",
                       g_last_seh_code, g_last_seh_address, rva);
         if (ep->ContextRecord) {
@@ -430,6 +818,185 @@ static int safe_call_original(void* request, void* arg1,
     } __except (seh_filter(GetExceptionInformation())) {
         return GetExceptionCode();
     }
+}
+
+static void* safe_call_tls_accessor(int slot = 5) {
+    if (!g_original_tls_accessor) {
+        return nullptr;
+    }
+    __try {
+        return g_original_tls_accessor(slot);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+static int process_capture_thread_jobs(const char* source_tag) {
+    int processed = 0;
+    while (true) {
+        auto job = pop_next_capture_thread_job();
+        if (!job) {
+            break;
+        }
+
+        bool cancelled = false;
+        {
+            std::lock_guard<std::mutex> job_lock(job->mutex);
+            cancelled = job->cancelled;
+        }
+
+        if (cancelled) {
+            std::lock_guard<std::mutex> job_lock(job->mutex);
+            if (!job->done) {
+                job->done = true;
+                job->result.error_code = 30;
+                job->result.error_message = "capture-thread job cancelled";
+                job->result.call_method = "capture_thread";
+            }
+            job->cv.notify_all();
+            processed++;
+            continue;
+        }
+
+        spdlog::info("{}: executing capture-thread direct job, content_len={}",
+                     source_tag ? source_tag : "capture_thread",
+                     job->content.size());
+
+        auto job_result = sns_do_comment(
+            job->sns_id,
+            job->content,
+            job->reply_to,
+            job->prefer_arg1_template);
+        job_result.call_method = "capture_thread";
+
+        {
+            std::lock_guard<std::mutex> job_lock(job->mutex);
+            job->result = std::move(job_result);
+            job->done = true;
+        }
+        job->cv.notify_all();
+        processed++;
+    }
+    return processed;
+}
+
+static LRESULT CALLBACK capture_thread_getmsg_hook(int code, WPARAM wParam, LPARAM lParam) {
+    if (code >= 0) {
+        MSG* msg = reinterpret_cast<MSG*>(lParam);
+        if (msg && (msg->message == WM_NULL || msg->message == WM_PYWECHAT_CAPTURE_TICK)) {
+            int n = process_capture_thread_jobs("capture_msg_hook");
+            if (n > 0) {
+                spdlog::info("capture_msg_hook: processed {} queued jobs", n);
+            }
+        }
+    }
+    return CallNextHookEx(g_capture_msg_hook, code, wParam, lParam);
+}
+
+static bool ensure_capture_thread_msg_hook() {
+    DWORD tid = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_capture_mutex);
+        tid = g_capture_thread_id;
+    }
+    if (tid == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_capture_msg_hook_mutex);
+    if (g_capture_msg_hook && g_capture_msg_hook_tid == tid) {
+        return true;
+    }
+
+    if (g_capture_msg_hook) {
+        UnhookWindowsHookEx(g_capture_msg_hook);
+        g_capture_msg_hook = nullptr;
+        g_capture_msg_hook_tid = 0;
+    }
+
+    g_capture_msg_hook = SetWindowsHookExA(
+        WH_GETMESSAGE,
+        capture_thread_getmsg_hook,
+        nullptr,
+        tid);
+    if (!g_capture_msg_hook) {
+        spdlog::warn("ensure_capture_thread_msg_hook: SetWindowsHookEx failed, err={}",
+                     GetLastError());
+        return false;
+    }
+    g_capture_msg_hook_tid = tid;
+    spdlog::info("capture message hook installed on tid={}", tid);
+    return true;
+}
+
+static void remove_capture_thread_msg_hook() {
+    std::lock_guard<std::mutex> lock(g_capture_msg_hook_mutex);
+    if (g_capture_msg_hook) {
+        UnhookWindowsHookEx(g_capture_msg_hook);
+        g_capture_msg_hook = nullptr;
+        g_capture_msg_hook_tid = 0;
+        spdlog::info("capture message hook removed");
+    }
+}
+
+static void* __fastcall hooked_tls_accessor(int slot) {
+    if (!g_original_tls_accessor) {
+        return nullptr;
+    }
+    void* value = g_original_tls_accessor(slot);
+    DWORD tid = GetCurrentThreadId();
+
+    // Capture thread: cache TLS value for arg1_ctx_helper to use
+    if (tid == g_capture_thread_id) {
+        if (value && looks_like_user_pointer(value)) {
+            g_capture_tls_accessor_value = value;
+            g_capture_tls_accessor_ready = true;
+            int cap = ++g_tls_accessor_capture_hits;
+            if (cap <= 8) {
+                spdlog::info("tls_accessor capture hit#{} -> {:#x}",
+                             cap, (uintptr_t)value);
+            }
+        }
+        return value;
+    }
+
+    // Worker thread: DO NOT override TLS accessor
+    // Let it return NULL - arg1_ctx_helper will patch arg1->+0x368 instead
+    // Overriding causes crashes because TLS container is not thread-safe
+    if (t_piggyback_parallel_worker && (!value || !looks_like_user_pointer(value))) {
+        ++g_tls_accessor_worker_miss;
+    }
+
+    return value;  // Return original value (likely NULL for worker threads)
+}
+
+static void* __fastcall hooked_arg1_ctx_helper(void* arg1, void* a2, void* a3, void* a4) {
+    if (t_piggyback_parallel_worker && arg1) {
+        void* ctx = nullptr;
+        if (g_cached_req_0x368_valid) {
+            ctx = g_cached_req_0x368;
+        } else if (g_capture_tls_accessor_ready &&
+                   looks_like_user_pointer(g_capture_tls_accessor_value)) {
+            ctx = g_capture_tls_accessor_value;
+        } else if (g_capture_tls_slot_0x358_ready) {
+            ctx = reinterpret_cast<void*>(g_capture_tls_slot_0x358_ptr);
+        }
+        if (ctx && looks_like_user_pointer(ctx)) {
+            bool patched = safe_copy_bytes(
+                reinterpret_cast<uint8_t*>(arg1) + 0x368, &ctx, sizeof(ctx));
+            if (patched) {
+                int hit = ++g_arg1_ctx_patch_hits;
+                if (hit <= 12) {
+                    spdlog::info("arg1_ctx_helper patch hit#{} arg1={:#x} ctx={:#x}",
+                                 hit, (uintptr_t)arg1, (uintptr_t)ctx);
+                }
+            }
+        }
+    }
+    if (!g_original_arg1_ctx_helper) {
+        return nullptr;
+    }
+    return g_original_arg1_ctx_helper(arg1, a2, a3, a4);
 }
 
 // =====================================================================
@@ -482,6 +1049,7 @@ static void* __fastcall hooked_cgi_A_caller_2(
     // --- 1b. Collect FLS + implicit TLS for parallel comment support ---
     collect_capture_fls();
     collect_capture_implicit_tls();
+    ensure_capture_thread_msg_hook();
 
     // --- 2. 缓存 SNS ID ---
     auto sns_id = read_msvc_string(req_bytes + OFF_SNS_ID);
@@ -496,46 +1064,7 @@ static void* __fastcall hooked_cgi_A_caller_2(
     }
 
     // --- 3. 执行 capture-thread direct-call 任务 ---
-    while (true) {
-        auto job = pop_next_capture_thread_job();
-        if (!job) {
-            break;
-        }
-
-        bool cancelled = false;
-        {
-            std::lock_guard<std::mutex> job_lock(job->mutex);
-            cancelled = job->cancelled;
-        }
-
-        if (cancelled) {
-            std::lock_guard<std::mutex> job_lock(job->mutex);
-            if (!job->done) {
-                job->done = true;
-                job->result.error_code = 30;
-                job->result.error_message = "capture-thread job cancelled";
-                job->result.call_method = "capture_thread";
-            }
-            job->cv.notify_all();
-            continue;
-        }
-
-        spdlog::info("hook: executing capture-thread direct job, content_len={}", job->content.size());
-
-        auto job_result = sns_do_comment(
-            job->sns_id,
-            job->content,
-            job->reply_to,
-            job->prefer_arg1_template);
-        job_result.call_method = "capture_thread";
-
-        {
-            std::lock_guard<std::mutex> job_lock(job->mutex);
-            job->result = std::move(job_result);
-            job->done = true;
-        }
-        job->cv.notify_all();
-    }
+    process_capture_thread_jobs("hook_callback");
 
     // --- 4. 检查待发评论队列, 注入 ---
     {
@@ -571,18 +1100,142 @@ static void* __fastcall hooked_cgi_A_caller_2(
     }
 
     // --- 5. 调用原始函数 ---
+    // Pre-call sampling: some builds clear/mutate +0x368 after return.
+    void* pre_arg1_ctx = nullptr;
+    bool pre_arg1_ctx_valid = false;
+    uint64_t pre_arg1_raw = 0;
+    int pre_arg1_tag_bits = 0;
+    if (arg1) {
+        pre_arg1_ctx_valid = read_tagged_context_ptr(
+            reinterpret_cast<const uint8_t*>(arg1),
+            0x368,
+            &pre_arg1_ctx,
+            &pre_arg1_raw,
+            &pre_arg1_tag_bits);
+    }
+    void* pre_req_ctx = nullptr;
+    bool pre_req_ctx_valid = false;
+    uint64_t pre_req_raw = 0;
+    int pre_req_tag_bits = 0;
+    if (REQUEST_CALL_BUFFER_SIZE > 0x370) {
+        pre_req_ctx_valid = read_tagged_context_ptr(
+            req_bytes,
+            0x368,
+            &pre_req_ctx,
+            &pre_req_raw,
+            &pre_req_tag_bits);
+    }
+
     auto* original_result = g_original_fn(request, arg1, arg2, arg3);
 
-    // --- 5b. Cache request->+0x368 for parallel piggyback ---
-    // After g_original_fn returns, request->+0x368 contains the thread-local
-    // context pointer set by the TLS accessor. Cache it for worker threads.
-    if (REQUEST_CALL_BUFFER_SIZE > 0x370) {
-        void* val = *reinterpret_cast<void**>(req_bytes + 0x368);
-        if (val && val != (void*)0xaaaaaaaaaaaaaaaa) {
-            g_cached_req_0x368 = val;
-            g_cached_req_0x368_valid = true;
-            spdlog::info("cached request->+0x368: {:#x}", (uintptr_t)val);
+    // Capture TLS accessor return on capture thread as a fallback source for
+    // parallel worker override.
+    if (g_original_tls_accessor) {
+        void* accessor_val = safe_call_tls_accessor();
+        if (accessor_val && looks_like_user_pointer(accessor_val)) {
+            g_capture_tls_accessor_value = accessor_val;
+            g_capture_tls_accessor_ready = true;
+            int cap = ++g_tls_accessor_capture_hits;
+            if (cap <= 8) {
+                spdlog::info("tls_accessor explicit capture hit#{} -> {:#x}",
+                             cap, (uintptr_t)accessor_val);
+            }
         }
+    }
+
+    // --- 5b. Cache a sane +0x368 context pointer for parallel piggyback ---
+    // Prefer arg1->+0x368 (closer to internal check chain), fallback to request->+0x368.
+    void* ctx_0x368 = nullptr;
+    bool ctx_0x368_valid = false;
+    if (arg1) {
+        void* arg1_ctx = nullptr;
+        uint64_t arg1_raw = 0;
+        int arg1_tag_bits = 0;
+        if (read_tagged_context_ptr(reinterpret_cast<const uint8_t*>(arg1),
+                                    0x368,
+                                    &arg1_ctx,
+                                    &arg1_raw,
+                                    &arg1_tag_bits)) {
+            ctx_0x368 = arg1_ctx;
+            ctx_0x368_valid = true;
+            spdlog::info("cached arg1->+0x368: raw={:#x} ptr={:#x} tag_bits={}",
+                         arg1_raw, (uintptr_t)arg1_ctx, arg1_tag_bits);
+        }
+    }
+    if (!ctx_0x368_valid && REQUEST_CALL_BUFFER_SIZE > 0x370) {
+        void* req_ctx = nullptr;
+        uint64_t req_raw = 0;
+        int req_tag_bits = 0;
+        if (read_tagged_context_ptr(req_bytes, 0x368, &req_ctx, &req_raw, &req_tag_bits)) {
+            ctx_0x368 = req_ctx;
+            ctx_0x368_valid = true;
+            spdlog::info("cached request->+0x368: raw={:#x} ptr={:#x} tag_bits={}",
+                         req_raw, (uintptr_t)req_ctx, req_tag_bits);
+        }
+    }
+    if (!ctx_0x368_valid && pre_arg1_ctx_valid) {
+        ctx_0x368 = pre_arg1_ctx;
+        ctx_0x368_valid = true;
+        spdlog::info("fallback context from pre-call arg1->+0x368: raw={:#x} ptr={:#x} tag_bits={}",
+                     pre_arg1_raw, (uintptr_t)pre_arg1_ctx, pre_arg1_tag_bits);
+    }
+    if (!ctx_0x368_valid && pre_req_ctx_valid) {
+        ctx_0x368 = pre_req_ctx;
+        ctx_0x368_valid = true;
+        spdlog::info("fallback context from pre-call request->+0x368: raw={:#x} ptr={:#x} tag_bits={}",
+                     pre_req_raw, (uintptr_t)pre_req_ctx, pre_req_tag_bits);
+    }
+    if (!ctx_0x368_valid && !g_capture_tls_accessor_ready && g_original_tls_accessor) {
+        void* pre_accessor = safe_call_tls_accessor();
+        if (pre_accessor && looks_like_user_pointer(pre_accessor)) {
+            g_capture_tls_accessor_value = pre_accessor;
+            g_capture_tls_accessor_ready = true;
+            int cap = ++g_tls_accessor_capture_hits;
+            if (cap <= 8) {
+                spdlog::info("tls_accessor fallback capture hit#{} -> {:#x}",
+                             cap, (uintptr_t)pre_accessor);
+            }
+        }
+    }
+    if (!ctx_0x368_valid &&
+        g_capture_tls_accessor_ready &&
+        looks_like_user_pointer(g_capture_tls_accessor_value)) {
+        void* normalized = normalize_ctx_object_ptr(
+            g_capture_tls_accessor_value,
+            "tls_accessor");
+        if (normalized) {
+            ctx_0x368 = normalized;
+            ctx_0x368_valid = true;
+            spdlog::info("fallback context from tls accessor: raw={:#x} normalized={:#x}",
+                         (uintptr_t)g_capture_tls_accessor_value,
+                         (uintptr_t)normalized);
+        }
+    }
+    if (!ctx_0x368_valid && g_capture_tls_slot_0x358_ready) {
+        void* normalized = normalize_ctx_object_ptr(
+            reinterpret_cast<void*>(g_capture_tls_slot_0x358_ptr),
+            "capture_tls_slot_0x358");
+        if (normalized) {
+            ctx_0x368 = normalized;
+            ctx_0x368_valid = true;
+            spdlog::info(
+                "fallback context from capture_tls_block+0x358: raw={:#x} ptr={:#x} normalized={:#x}",
+                g_capture_tls_slot_0x358_raw,
+                g_capture_tls_slot_0x358_ptr,
+                (uintptr_t)normalized);
+        }
+    }
+    g_cached_req_0x368_valid = ctx_0x368_valid;
+    if (ctx_0x368_valid) {
+        g_cached_req_0x368 = ctx_0x368;
+    } else {
+        spdlog::warn(
+            "parallel context not ready: arg1_raw={:#x} req_raw={:#x} tls_accessor_ready={} tls_358_ready={} tls_358_raw={:#x}",
+            pre_arg1_raw,
+            pre_req_raw,
+            g_capture_tls_accessor_ready,
+            g_capture_tls_slot_0x358_ready,
+            g_capture_tls_slot_0x358_raw);
     }
 
     // --- 6. Piggyback: drain parallel queue while arg1 is still valid ---
@@ -594,8 +1247,7 @@ static void* __fastcall hooked_cgi_A_caller_2(
             g_piggyback_batch.reset();
         }
         if (batch && !batch->comments.empty()) {
-            bool use_parallel = (batch->max_concurrency > 1 &&
-                                 g_cached_req_0x368_valid);
+            bool use_parallel = (batch->max_concurrency > 1);
 
             spdlog::info("hook piggyback: firing {} comments {} (req_0x368={:#x})",
                          batch->comments.size(),
@@ -611,80 +1263,195 @@ static void* __fastcall hooked_cgi_A_caller_2(
 
             if (use_parallel) {
                 // ===== PARALLEL MODE: spawn worker threads =====
-                std::vector<std::thread> workers;
-                int conc = (std::min)((int)batch->comments.size(),
-                                      batch->max_concurrency);
-                workers.reserve(conc);
+                auto tls_diag = get_tls_diag_info();
+                const bool implicit_tls_ready =
+                    tls_diag.has_tls_directory &&
+                    tls_diag.capture_implicit_tls_valid &&
+                    tls_diag.tls_index_value != 0xFFFFFFFF &&
+                    tls_diag.tls_data_size > 0 &&
+                    tls_diag.capture_tls_block_addr != 0;
+                const bool fls_ready = tls_diag.capture_fls_nonzero > 0;
 
-                for (size_t i = 0; i < batch->comments.size(); ++i) {
-                    workers.emplace_back([&, i, pb_sns, arg1, arg2, arg3]() {
-                        alignas(16) uint8_t pb_req[REQUEST_CALL_BUFFER_SIZE];
-                        memcpy(pb_req, g_request_template.data(),
-                               REQUEST_CALL_BUFFER_SIZE);
+                spdlog::info(
+                    "piggyback_parallel context: implicit_ready={} (idx={}, size={}, block={:#x}) "
+                    "fls_ready={} (capture_fls_nonzero={})",
+                    implicit_tls_ready,
+                    tls_diag.tls_index_value,
+                    tls_diag.tls_data_size,
+                    tls_diag.capture_tls_block_addr,
+                    fls_ready,
+                    tls_diag.capture_fls_nonzero);
 
-                        // Pre-fill request->+0x368 with cached TLS context pointer.
-                        // Without this, the template has 0xAA fill (non-NULL),
-                        // so the internal NULL check at 0x3c597f is skipped,
-                        // and the invalid pointer causes a crash at 0x3c5c70.
-                        if (REQUEST_CALL_BUFFER_SIZE > 0x370 && g_cached_req_0x368_valid) {
-                            *reinterpret_cast<void**>(pb_req + 0x368) = g_cached_req_0x368;
-                        }
-
-                        *reinterpret_cast<void***>(pb_req + OFF_VTABLE) =
-                            g_captured_vtable;
-                        *reinterpret_cast<void**>(pb_req + OFF_AUTHOR_INFO) =
-                            g_captured_author_info;
-                        *reinterpret_cast<void**>(pb_req + OFF_AUTHOR_INFO + 8) =
-                            g_captured_author_info2;
-
-                        char* h1 = write_msvc_string_heap(
-                            pb_req + OFF_SNS_ID, pb_sns);
-                        char* h2 = write_msvc_string_heap(
-                            pb_req + OFF_CONTENT, batch->comments[i]);
-                        char* h3 = write_msvc_string_heap(
-                            pb_req + OFF_REPLY_TO, batch->reply_to);
-                        char* h4 = write_msvc_string_heap(
-                            pb_req + OFF_COMMENT_KEY, make_short_comment_key());
-
-                        auto t0 = std::chrono::steady_clock::now();
-                        CommentResult cr;
-                        int seh_rc = safe_call_original(
-                            pb_req, arg1, arg2, arg3);
-                        auto t1 = std::chrono::steady_clock::now();
-                        cr.latency_ms = static_cast<int>(
-                            std::chrono::duration_cast<
-                                std::chrono::milliseconds>(t1 - t0).count());
-                        if (seh_rc == 0) {
-                            cr.error_code = 0;
-                            cr.call_method = "piggyback_parallel";
-                        } else {
-                            cr.error_code = 30;
-                            cr.error_message = "SEH in piggyback_parallel";
-                            cr.call_method = "piggyback_parallel";
-                            spdlog::error("piggyback_parallel[{}]: SEH exc", i);
-                        }
-
-                        auto heap = GetProcessHeap();
-                        if (h1) HeapFree(heap, 0, h1);
-                        if (h2) HeapFree(heap, 0, h2);
-                        if (h3) HeapFree(heap, 0, h3);
-                        if (h4) HeapFree(heap, 0, h4);
-
-                        batch->results[i] = std::move(cr);
-                        spdlog::info("piggyback_parallel[{}]: code={} lat={}ms",
-                                     i, cr.error_code, cr.latency_ms);
-                    });
-
-                    // Throttle: wait when we hit max_concurrency
-                    if (workers.size() >= static_cast<size_t>(conc)) {
-                        for (auto& w : workers) {
-                            if (w.joinable()) w.join();
-                        }
-                        workers.clear();
-                    }
+                void* parallel_ctx = nullptr;
+                if (g_cached_req_0x368_valid &&
+                    looks_like_vtable_object(g_cached_req_0x368)) {
+                    parallel_ctx = g_cached_req_0x368;
+                } else if (g_capture_tls_accessor_ready &&
+                           looks_like_user_pointer(g_capture_tls_accessor_value)) {
+                    parallel_ctx = normalize_ctx_object_ptr(
+                        g_capture_tls_accessor_value,
+                        "parallel_gate_tls_accessor");
+                } else if (g_capture_tls_slot_0x358_ready) {
+                    parallel_ctx = normalize_ctx_object_ptr(
+                        reinterpret_cast<void*>(g_capture_tls_slot_0x358_ptr),
+                        "parallel_gate_tls_slot_0x358");
                 }
-                for (auto& w : workers) {
-                    if (w.joinable()) w.join();
+                if (parallel_ctx) {
+                    g_cached_req_0x368 = parallel_ctx;
+                    g_cached_req_0x368_valid = true;
+                }
+
+                if (!parallel_ctx) {
+                    spdlog::error(
+                        "piggyback_parallel blocked: context object unavailable "
+                        "(cached_valid={} tls_accessor_ready={} tls_358_ready={})",
+                        g_cached_req_0x368_valid,
+                        g_capture_tls_accessor_ready,
+                        g_capture_tls_slot_0x358_ready);
+                    for (size_t i = 0; i < batch->comments.size(); ++i) {
+                        CommentResult cr;
+                        cr.error_code = 31;
+                        cr.error_message = "parallel context object unavailable";
+                        cr.call_method = "piggyback_parallel";
+                        batch->results[i] = std::move(cr);
+                    }
+                } else {
+                    std::vector<std::thread> workers;
+                    int conc = (std::min)((int)batch->comments.size(),
+                                          batch->max_concurrency);
+                    workers.reserve(conc);
+
+                    for (size_t i = 0; i < batch->comments.size(); ++i) {
+                        workers.emplace_back([&, i, pb_sns, arg1, arg2, arg3,
+                                              implicit_tls_ready, fls_ready, parallel_ctx]() {
+                            void* context_368 = nullptr;
+
+                            bool implicit_copied = false;
+                            int tls_slots_copied = 0;
+                            int fls_copied = 0;
+                            tls_slots_copied = copy_tls_slots_to_current();
+                            if (implicit_tls_ready) {
+                                implicit_copied = copy_implicit_tls_to_current(
+                                    tls_diag.tls_index_value,
+                                    tls_diag.tls_data_size,
+                                    tls_diag.capture_tls_block_addr);
+                            }
+                            if (fls_ready) {
+                                fls_copied = copy_fls_to_current();
+                            }
+
+                            // Prefer worker-local context extracted from the current
+                            // thread's TLS accessor after TLS/FLS copy.
+                            if (g_original_tls_accessor) {
+                                void* worker_tls_raw = safe_call_tls_accessor();
+                                if (worker_tls_raw && looks_like_user_pointer(worker_tls_raw)) {
+                                    context_368 = normalize_ctx_object_ptr(
+                                        worker_tls_raw,
+                                        "worker_local_tls_accessor");
+                                }
+                            }
+                            if (!context_368) {
+                                // Keep a conservative fallback for diagnostics only.
+                                context_368 = parallel_ctx;
+                            }
+
+                            alignas(16) uint8_t pb_req[REQUEST_CALL_BUFFER_SIZE];
+                            memcpy(pb_req, g_request_template.data(),
+                                   REQUEST_CALL_BUFFER_SIZE);
+
+                        // Keep request->+0x368 exactly as captured template bytes.
+                        // Forcing a synthetic pointer here can bypass internal
+                        // fixup and crash at downstream virtual calls.
+
+                        // Use per-worker arg1 template to avoid cross-thread races
+                        // on shared arg1->+0x368 state.
+                            alignas(16) uint8_t pb_arg1[ARG1_TEMPLATE_SIZE];
+                            void* worker_arg1 = arg1;
+                            bool arg1_copied = false;
+                            if (g_arg1_template_ready) {
+                                memcpy(pb_arg1, g_arg1_template.data(), ARG1_TEMPLATE_SIZE);
+                                worker_arg1 = pb_arg1;
+                                arg1_copied = true;
+                            }
+                            bool arg1_ctx_written = false;
+                            if (!context_368 || !looks_like_vtable_object(context_368)) {
+                                CommentResult cr;
+                                cr.error_code = 31;
+                                cr.error_message = "parallel worker context unavailable";
+                                cr.call_method = "piggyback_parallel";
+                                batch->results[i] = std::move(cr);
+                                spdlog::warn(
+                                    "piggyback_parallel[{}]: skip invalid context ctx={:#x}",
+                                    i, (uintptr_t)context_368);
+                                return;
+                            }
+                            log_ctx_object_fingerprint(context_368, "worker-before-call");
+                            if (worker_arg1 && ARG1_TEMPLATE_SIZE > 0x370) {
+                                arg1_ctx_written = safe_copy_bytes(
+                                    reinterpret_cast<uint8_t*>(worker_arg1) + 0x368,
+                                    &context_368,
+                                    sizeof(context_368));
+                            }
+
+                            *reinterpret_cast<void***>(pb_req + OFF_VTABLE) =
+                                g_captured_vtable;
+                            *reinterpret_cast<void**>(pb_req + OFF_AUTHOR_INFO) =
+                                g_captured_author_info;
+                            *reinterpret_cast<void**>(pb_req + OFF_AUTHOR_INFO + 8) =
+                                g_captured_author_info2;
+
+                            char* h1 = write_msvc_string_heap(
+                                pb_req + OFF_SNS_ID, pb_sns);
+                            char* h2 = write_msvc_string_heap(
+                                pb_req + OFF_CONTENT, batch->comments[i]);
+                            char* h3 = write_msvc_string_heap(
+                                pb_req + OFF_REPLY_TO, batch->reply_to);
+                            char* h4 = write_msvc_string_heap(
+                                pb_req + OFF_COMMENT_KEY, make_short_comment_key());
+
+                            auto t0 = std::chrono::steady_clock::now();
+                            CommentResult cr;
+                            t_piggyback_parallel_worker = true;
+                            int seh_rc = safe_call_original(
+                                pb_req, worker_arg1, arg2, arg3);
+                            t_piggyback_parallel_worker = false;
+                            auto t1 = std::chrono::steady_clock::now();
+                            cr.latency_ms = static_cast<int>(
+                                std::chrono::duration_cast<
+                                    std::chrono::milliseconds>(t1 - t0).count());
+                            if (seh_rc == 0) {
+                                cr.error_code = 0;
+                                cr.call_method = "piggyback_parallel";
+                            } else {
+                                cr.error_code = 30;
+                                cr.error_message = "SEH in piggyback_parallel";
+                                cr.call_method = "piggyback_parallel";
+                                spdlog::error("piggyback_parallel[{}]: SEH exc", i);
+                            }
+
+                            auto heap = GetProcessHeap();
+                            if (h1) HeapFree(heap, 0, h1);
+                            if (h2) HeapFree(heap, 0, h2);
+                            if (h3) HeapFree(heap, 0, h3);
+                            if (h4) HeapFree(heap, 0, h4);
+
+                            batch->results[i] = std::move(cr);
+                            spdlog::info(
+                                "piggyback_parallel[{}]: code={} lat={}ms implicit_tls={} tls_slots_copied={} fls_copied={} arg1_copied={} arg1_ctx_written={} ctx={:#x}",
+                                i, cr.error_code, cr.latency_ms, implicit_copied, tls_slots_copied, fls_copied, arg1_copied, arg1_ctx_written, (uintptr_t)context_368);
+                        });
+
+                        // Throttle: wait when we hit max_concurrency
+                        if (workers.size() >= static_cast<size_t>(conc)) {
+                            for (auto& w : workers) {
+                                if (w.joinable()) w.join();
+                            }
+                            workers.clear();
+                        }
+                    }
+                    for (auto& w : workers) {
+                        if (w.joinable()) w.join();
+                    }
                 }
             } else {
                 // ===== SERIAL MODE (original) =====
@@ -908,6 +1675,7 @@ static void* __fastcall hooked_cgi_A_top(
     // Collect FLS + implicit TLS for parallel comment support
     collect_capture_fls();
     collect_capture_implicit_tls();
+    ensure_capture_thread_msg_hook();
 
     // Cache SNS ID
     if (!sns_id.empty()) {
@@ -917,39 +1685,7 @@ static void* __fastcall hooked_cgi_A_top(
     }
 
     // Process capture-thread direct-call jobs
-    while (true) {
-        auto job = pop_next_capture_thread_job();
-        if (!job) break;
-
-        bool cancelled = false;
-        {
-            std::lock_guard<std::mutex> job_lock(job->mutex);
-            cancelled = job->cancelled;
-        }
-        if (cancelled) {
-            std::lock_guard<std::mutex> job_lock(job->mutex);
-            if (!job->done) {
-                job->done = true;
-                job->result.error_code = 30;
-                job->result.error_message = "capture-thread job cancelled";
-                job->result.call_method = "capture_thread_top";
-            }
-            job->cv.notify_all();
-            continue;
-        }
-
-        spdlog::info("TOP_HOOK: executing capture-thread direct job");
-        auto job_result = sns_do_comment(
-            job->sns_id, job->content, job->reply_to, job->prefer_arg1_template);
-        job_result.call_method = "capture_thread_top";
-
-        {
-            std::lock_guard<std::mutex> job_lock(job->mutex);
-            job->result = std::move(job_result);
-            job->done = true;
-        }
-        job->cv.notify_all();
-    }
+    process_capture_thread_jobs("hook_top_callback");
 
     // Process pending comment queue
     {
@@ -992,10 +1728,14 @@ bool init_sns_comment() {
     if (ver == "4.1.7.30") {
         auto comment_addr = base + COMMENT_FN_RVA;
         auto top_addr = base + TOP_FN_RVA;
+        auto tls_accessor_addr = base + TLS_ACCESSOR_RVA;
+        auto arg1_ctx_helper_addr = base + ARG1_CTX_HELPER_RVA;
         spdlog::info("version {} matched, using hardcoded RVA: {:#x} (caller2), {:#x} (top)",
                      ver, comment_addr, top_addr);
         g_target_fn_addr = comment_addr;
         g_top_fn_addr = top_addr;
+        g_tls_accessor_addr = tls_accessor_addr;
+        g_arg1_ctx_helper_addr = arg1_ctx_helper_addr;
     } else {
         // 2. 未知版本: 特征码扫描
         spdlog::info("version {} not hardcoded, using signature scan", ver);
@@ -1011,6 +1751,8 @@ bool init_sns_comment() {
         g_target_fn_addr = comment_addr;
         spdlog::info("SnsComment function @ {:#x} (RVA {:#x})",
                      comment_addr, comment_addr - base);
+        g_tls_accessor_addr = 0;
+        g_arg1_ctx_helper_addr = 0;
     }
 
     // vtable
@@ -1047,11 +1789,73 @@ bool install_comment_hook() {
 
     g_hook_installed = true;
     spdlog::info("comment hook installed @ {:#x}", g_target_fn_addr);
+
+    if (g_tls_accessor_addr != 0) {
+        auto tls_target = reinterpret_cast<LPVOID>(g_tls_accessor_addr);
+        status = MH_CreateHook(
+            tls_target,
+            reinterpret_cast<LPVOID>(&hooked_tls_accessor),
+            reinterpret_cast<LPVOID*>(&g_original_tls_accessor)
+        );
+        if (status != MH_OK) {
+            spdlog::warn("MH_CreateHook tls accessor failed: {}", MH_StatusToString(status));
+        } else {
+            status = MH_EnableHook(tls_target);
+            if (status != MH_OK) {
+                spdlog::warn("MH_EnableHook tls accessor failed: {}", MH_StatusToString(status));
+                MH_RemoveHook(tls_target);
+                g_original_tls_accessor = nullptr;
+            } else {
+                g_tls_accessor_hook_installed = true;
+                spdlog::info("tls accessor hook installed @ {:#x}", g_tls_accessor_addr);
+            }
+        }
+    }
+
+    if (g_arg1_ctx_helper_addr != 0) {
+        auto helper_target = reinterpret_cast<LPVOID>(g_arg1_ctx_helper_addr);
+        status = MH_CreateHook(
+            helper_target,
+            reinterpret_cast<LPVOID>(&hooked_arg1_ctx_helper),
+            reinterpret_cast<LPVOID*>(&g_original_arg1_ctx_helper)
+        );
+        if (status != MH_OK) {
+            spdlog::warn("MH_CreateHook arg1 ctx helper failed: {}", MH_StatusToString(status));
+        } else {
+            status = MH_EnableHook(helper_target);
+            if (status != MH_OK) {
+                spdlog::warn("MH_EnableHook arg1 ctx helper failed: {}", MH_StatusToString(status));
+                MH_RemoveHook(helper_target);
+                g_original_arg1_ctx_helper = nullptr;
+            } else {
+                g_arg1_ctx_helper_hook_installed = true;
+                spdlog::info("arg1 ctx helper hook installed @ {:#x}", g_arg1_ctx_helper_addr);
+            }
+        }
+    }
     return true;
 }
 
 void uninstall_comment_hook() {
     if (!g_hook_installed || g_target_fn_addr == 0) return;
+
+    remove_capture_thread_msg_hook();
+
+    if (g_arg1_ctx_helper_hook_installed && g_arg1_ctx_helper_addr != 0) {
+        auto helper_target = reinterpret_cast<LPVOID>(g_arg1_ctx_helper_addr);
+        MH_DisableHook(helper_target);
+        MH_RemoveHook(helper_target);
+        g_arg1_ctx_helper_hook_installed = false;
+        g_original_arg1_ctx_helper = nullptr;
+    }
+
+    if (g_tls_accessor_hook_installed && g_tls_accessor_addr != 0) {
+        auto tls_target = reinterpret_cast<LPVOID>(g_tls_accessor_addr);
+        MH_DisableHook(tls_target);
+        MH_RemoveHook(tls_target);
+        g_tls_accessor_hook_installed = false;
+        g_original_tls_accessor = nullptr;
+    }
 
     auto target = reinterpret_cast<LPVOID>(g_target_fn_addr);
     MH_DisableHook(target);
@@ -1530,6 +2334,29 @@ CommentResult sns_do_comment_on_capture_thread(
         g_capture_thread_jobs.push_back(job);
     }
 
+    // Try actively waking capture thread via message hook so this call does not
+    // rely on the next UI comment callback.
+    bool wake_sent = false;
+    if (ensure_capture_thread_msg_hook()) {
+        DWORD capture_tid = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_capture_mutex);
+            capture_tid = g_capture_thread_id;
+        }
+        if (capture_tid != 0) {
+            if (PostThreadMessage(capture_tid, WM_PYWECHAT_CAPTURE_TICK, 0, 0) ||
+                PostThreadMessage(capture_tid, WM_NULL, 0, 0)) {
+                wake_sent = true;
+            } else {
+                spdlog::warn("capture-thread wake PostThreadMessage failed, err={}",
+                             GetLastError());
+            }
+        }
+    }
+    if (!wake_sent) {
+        spdlog::debug("capture-thread wake not sent, waiting for callback trigger");
+    }
+
     // Wait until the next hook callback executes this job.
     std::unique_lock<std::mutex> lk(job->mutex);
     const bool done = job->cv.wait_for(
@@ -1755,6 +2582,7 @@ static void collect_capture_fls() {
 // Capture-thread implicit TLS block address
 static uintptr_t g_capture_implicit_tls_block = 0;
 static bool g_capture_implicit_tls_collected = false;
+static std::atomic<int> g_tls_slot_0x358_log_hits{0};
 
 static void collect_capture_implicit_tls() {
     // Read TEB->ThreadLocalStoragePointer (offset 0x58 on x64)
@@ -1781,6 +2609,34 @@ static void collect_capture_implicit_tls() {
 
     g_capture_implicit_tls_block = tls_array[tls_index];
     g_capture_implicit_tls_collected = true;
+
+    g_capture_tls_slot_0x358_raw = 0;
+    g_capture_tls_slot_0x358_ptr = 0;
+    g_capture_tls_slot_0x358_ready = false;
+    if (g_capture_implicit_tls_block) {
+        uint64_t raw = 0;
+        if (safe_copy_bytes(&raw,
+                            reinterpret_cast<void*>(g_capture_implicit_tls_block + 0x358),
+                            sizeof(raw))) {
+            g_capture_tls_slot_0x358_raw = raw;
+            uintptr_t ptr = 0;
+            int tag_bits = 0;
+            if (decode_tagged_pointer(raw, &ptr, &tag_bits)) {
+                g_capture_tls_slot_0x358_ptr = ptr;
+                g_capture_tls_slot_0x358_ready = true;
+            }
+            int hit = ++g_tls_slot_0x358_log_hits;
+            if (hit <= 12) {
+                spdlog::info(
+                    "capture_tls_block+0x358: raw={:#x} ptr={:#x} ready={} tag_bits={} block={:#x}",
+                    g_capture_tls_slot_0x358_raw,
+                    g_capture_tls_slot_0x358_ptr,
+                    g_capture_tls_slot_0x358_ready,
+                    tag_bits,
+                    g_capture_implicit_tls_block);
+            }
+        }
+    }
 }
 
 // SEH helper: read uint32 safely (cannot use __try in functions with unwindable objects)
@@ -1884,15 +2740,32 @@ static bool copy_implicit_tls_to_current(uint32_t tls_index, size_t tls_data_siz
                            tls_data_size);
 }
 
-// Helper: copy FLS slots from capture snapshot to current thread
+// Helper: copy capture-thread TLS slots to current thread (force overwrite).
+static int copy_tls_slots_to_current() {
+    int copied = 0;
+    for (int i = 0; i < TLS_SLOT_COUNT; i++) {
+        if (g_capture_tls_slots[i] != 0) {
+            void* current = TlsGetValue(i);
+            if ((uintptr_t)current != g_capture_tls_slots[i]) {
+                if (TlsSetValue(i, (LPVOID)g_capture_tls_slots[i])) {
+                    copied++;
+                }
+            }
+        }
+    }
+    return copied;
+}
+
+// Helper: copy FLS slots from capture snapshot to current thread (force overwrite).
 static int copy_fls_to_current() {
     int copied = 0;
     for (int i = 0; i < FLS_SLOT_MAX; i++) {
         if (g_capture_fls_slots[i] != 0) {
             void* current = FlsGetValue(i);
-            if (!current) {
-                FlsSetValue(i, (LPVOID)g_capture_fls_slots[i]);
-                copied++;
+            if ((uintptr_t)current != g_capture_fls_slots[i]) {
+                if (FlsSetValue(i, (LPVOID)g_capture_fls_slots[i])) {
+                    copied++;
+                }
             }
         }
     }

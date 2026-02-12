@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -188,6 +189,14 @@ TlsDiagInfo get_tls_diag_info();
 
 /// Exposed state for status API
 extern bool g_cached_req_0x368_valid;
+
+// ===== TLS override control =====
+
+/// Kill switch for TLS override (can be disabled via pipe config)
+extern bool g_tls_override_enabled;
+/// Metrics for TLS override
+extern std::atomic<int> g_tls_accessor_override_hits;
+extern std::atomic<int> g_tls_accessor_worker_miss;
 
 // ===== Parallel comment =====
 

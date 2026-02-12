@@ -234,6 +234,9 @@ std::string PipeServer::dispatch(const std::string& request_json) {
                 {"request_template_ready", has_request_template()},
                 {"arg1_template_ready", has_arg1_template()},
                 {"parallel_ready", g_cached_req_0x368_valid},
+                {"tls_override_enabled", g_tls_override_enabled},
+                {"tls_accessor_override_hits", g_tls_accessor_override_hits.load()},
+                {"tls_accessor_worker_miss", g_tls_accessor_worker_miss.load()},
             };
 
         } else if (cmd == "diagnose_thread") {
@@ -335,8 +338,9 @@ std::string PipeServer::dispatch(const std::string& request_json) {
                         {"latency_ms", r.latency_ms},
                     });
                 }
-                resp["ok"] = (batch.succeeded > 0);
-                resp["error_code"] = (batch.succeeded > 0) ? 0 : 30;
+                const bool all_ok = (batch.total > 0 && batch.succeeded == batch.total);
+                resp["ok"] = all_ok;
+                resp["error_code"] = all_ok ? 0 : 30;
                 resp["error_message"] = (batch.failed > 0)
                     ? std::to_string(batch.failed) + "/" + std::to_string(batch.total) + " failed"
                     : "";
@@ -448,8 +452,9 @@ std::string PipeServer::dispatch(const std::string& request_json) {
                         {"crash_fault_addr", r.crash_fault_addr},
                     });
                 }
-                resp["ok"] = (batch.succeeded > 0);
-                resp["error_code"] = (batch.succeeded > 0) ? 0 : 30;
+                const bool all_ok = (batch.total > 0 && batch.succeeded == batch.total);
+                resp["ok"] = all_ok;
+                resp["error_code"] = all_ok ? 0 : 30;
                 resp["error_message"] = (batch.failed > 0)
                     ? std::to_string(batch.failed) + "/" + std::to_string(batch.total) + " failed"
                     : "";
@@ -495,8 +500,9 @@ std::string PipeServer::dispatch(const std::string& request_json) {
                         {"latency_ms", r.latency_ms},
                     });
                 }
-                resp["ok"] = (batch.succeeded > 0);
-                resp["error_code"] = (batch.succeeded > 0) ? 0 : 30;
+                const bool all_ok = (batch.total > 0 && batch.succeeded == batch.total);
+                resp["ok"] = all_ok;
+                resp["error_code"] = all_ok ? 0 : 30;
                 resp["error_message"] = (batch.failed > 0)
                     ? std::to_string(batch.failed) + "/"
                       + std::to_string(batch.total) + " failed"
@@ -508,6 +514,21 @@ std::string PipeServer::dispatch(const std::string& request_json) {
                     {"total_latency_ms", batch.total_latency_ms},
                     {"results", results_arr},
                 };
+            }
+
+        } else if (cmd == "set_config") {
+            std::string key = req.value("key", "");
+            if (key == "tls_override_enabled") {
+                g_tls_override_enabled = req.value("value", true);
+                spdlog::info("config set: tls_override_enabled = {}", g_tls_override_enabled);
+                resp["ok"] = true;
+                resp["error_code"] = 0;
+                resp["data"] = {{"key", key}, {"value", g_tls_override_enabled}};
+            } else {
+                resp["ok"] = false;
+                resp["error_code"] = 10;
+                resp["error_message"] = "unknown config key: " + key;
+                resp["data"] = json::object();
             }
 
         } else {
