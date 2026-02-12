@@ -21,6 +21,7 @@
 #include "hook_manager.h"
 #include "version_check.h"
 #include "sns_comment.h"
+#include "sns_moments_poc.h"  // Phase 0: Route B PoC
 
 static std::thread g_init_thread;
 static std::atomic<bool> g_running{false};
@@ -51,6 +52,14 @@ static void init_routine() {
             }
         } else {
             spdlog::warn("sns_comment init failed, comment feature unavailable");
+        }
+
+        // Phase 0: Initialize SNS moments PoC hook
+        if (pywechat::init_sns_moments_poc()) {
+            spdlog::info("SNS moments PoC hook installed");
+        } else {
+            spdlog::warn("SNS moments PoC hook failed - Phase 0 cannot proceed");
+            spdlog::warn("Need to extract correct signature from IDA Pro");
         }
 
         // Start pipe server (blocks until g_running == false)
@@ -84,6 +93,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     case DLL_PROCESS_DETACH:
         g_running.store(false);
         pywechat::uninstall_comment_hook();
+        pywechat::cleanup_sns_moments_poc();  // Phase 0: cleanup
         pywechat::HookManager::instance().cleanup();
         spdlog::info("pywechat_hook unloaded");
         spdlog::shutdown();

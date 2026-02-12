@@ -38,6 +38,7 @@ add_library(pywechat_hook SHARED
     src/sns_comment.cpp
     src/hook_manager.cpp
     src/version_check.cpp
+    src/sns_moments_poc.cpp
 )
 
 target_include_directories(pywechat_hook PRIVATE src)
