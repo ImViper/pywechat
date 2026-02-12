@@ -1607,24 +1607,123 @@ def fetch_and_comment_from_moments_feed(
             hook_batch_mode = os.environ.get(
                 "PYWEIXIN_HOOK_BATCH_MODE", "piggyback"
             ).strip().lower()
-            use_hook_batch = _use_hook and hook_batch_mode in {"piggyback", "parallel", "serial"}
+            use_hook_batch = _use_hook and hook_batch_mode in {
+                "piggyback", "parallel", "serial", "fast_first_batch"
+            }
 
             # Batch-first path for Hook mode: collect all answers, then send in one batch.
             if use_hook_batch and _hook_dispatcher is not None:
-                print(f"[debug:stream] hook batch mode={hook_batch_mode}, collecting answers")
-                while True:
+                if hook_batch_mode == "fast_first_batch":
+                    # ============================================================
+                    # Fast-First + Batch-Rest Strategy
+                    # 1. Wait for first answer (usually OCR, ~300ms)
+                    # 2. Post immediately via Hook
+                    # 3. Continue collecting remaining answers (timeout 8s)
+                    # 4. Batch post remaining in Serial Mode
+                    # ============================================================
+                    print("[debug:stream] fast_first_batch mode: waiting for first answer")
+
+                    first_answer = None
+                    first_start = time.time()
                     try:
-                        answer = answer_queue.get(timeout=15)
+                        first_answer = answer_queue.get(timeout=2.0)  # 最多等 2 秒
+                        first_elapsed = int((time.time() - first_start) * 1000)
+                        print(f"[debug:stream] first answer ready ({first_elapsed}ms): {first_answer}")
                     except _queue_mod.Empty:
-                        print("[debug:stream] queue timeout, stopping")
-                        break
-                    if answer is None:
-                        print("[debug:stream] sentinel received, all answers processed")
-                        break
-                    answer = str(answer).strip()
-                    if not answer:
-                        continue
-                    all_answers.append(answer)
+                        print("[debug:stream] first answer timeout, fallback to batch")
+
+                    posted_any = False
+
+                    # Post first answer immediately
+                    if first_answer:
+                        first_answer = str(first_answer).strip()
+                        if first_answer:
+                            try:
+                                first_result = _hook_dispatcher.post_comment(
+                                    first_answer,
+                                    author="",
+                                    content_hash=result.get("fingerprint", "")[:16],
+                                )
+                                posted_any = first_result.success
+                                comment_count = 1
+                                all_answers.append(first_answer)
+
+                                if first_result.success:
+                                    print(f"[debug:stream] first comment posted via {first_result.method}: {first_answer}")
+                                else:
+                                    print(f"[debug:stream] first comment failed: {first_result.error_message}")
+
+                            except Exception as exc:
+                                print(f"[debug:stream] first comment exception: {exc}")
+
+                    # Collect remaining answers (non-blocking with timeout)
+                    remaining = []
+                    collect_start = time.time()
+                    max_collect_time = 8.0  # 最多再收集 8 秒
+
+                    print("[debug:stream] collecting remaining answers...")
+                    while len(remaining) < 10:  # 最多 10 条后续评论
+                        timeout = max(0.1, max_collect_time - (time.time() - collect_start))
+                        if timeout <= 0:
+                            print("[debug:stream] collect timeout reached")
+                            break
+
+                        try:
+                            answer = answer_queue.get(timeout=timeout)
+                            if answer is None:
+                                print("[debug:stream] sentinel received, all answers collected")
+                                break
+
+                            answer = str(answer).strip()
+                            if answer and answer != first_answer:  # 排除与第 1 条重复的
+                                remaining.append(answer)
+                                print(f"[debug:stream] queued: {answer}")
+
+                        except _queue_mod.Empty:
+                            print("[debug:stream] no more answers in queue")
+                            break
+
+                    # Batch post remaining comments
+                    if remaining:
+                        print(f"[debug:stream] batch posting {len(remaining)} remaining comments")
+                        try:
+                            batch_concurrency = int(
+                                os.environ.get("PYWEIXIN_HOOK_MAX_CONCURRENCY", "1")  # Serial=1
+                            )
+                            if batch_concurrency < 1:
+                                batch_concurrency = 1
+
+                            batch_result = _hook_dispatcher.post_batch_comments(
+                                remaining,
+                                author="",
+                                content_hash=result.get("fingerprint", "")[:16],
+                                concurrency=batch_concurrency,
+                            )
+                            all_answers.extend(remaining)
+                            posted_any = posted_any or (batch_result.succeeded > 0)
+                            comment_count += batch_result.succeeded
+
+                            print(f"[debug:stream] batch posted: {batch_result.succeeded}/{batch_result.total}")
+
+                        except Exception as exc:
+                            print(f"[debug:stream] batch post exception: {exc}")
+
+                elif hook_batch_mode in {"piggyback", "parallel", "serial"}:
+                    # Original batch mode logic
+                    print(f"[debug:stream] hook batch mode={hook_batch_mode}, collecting answers")
+                    while True:
+                        try:
+                            answer = answer_queue.get(timeout=15)
+                        except _queue_mod.Empty:
+                            print("[debug:stream] queue timeout, stopping")
+                            break
+                        if answer is None:
+                            print("[debug:stream] sentinel received, all answers processed")
+                            break
+                        answer = str(answer).strip()
+                        if not answer:
+                            continue
+                        all_answers.append(answer)
 
                 comment_count = len(all_answers)
                 if all_answers:

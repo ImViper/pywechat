@@ -58,6 +58,14 @@ from pyweixin.moments_ext import (
 from pyweixin.rush_engine import run_rush_loop,load_rush_config,resolve_answer,parse_answer_from_templates
 from pyweixin.rush_types import RushConfig,QuestionTemplate,AnswerResult
 from pyweixin.rush_ai import ArkResponsesProvider,SiliconFlowOpenAIProvider,NullAIProvider,NullOCRProvider,PaddleOCRProvider
+from pyweixin.rush_callback_multi import (
+    OCRCommentSource,
+    AICommentSource,
+    CannedCommentSource,
+    OCRRetryCommentSource,
+    DynamicCommentSource,
+    create_multi_source_streaming_callback,
+)
 from pyweixin.hook_types import HookErrorCode,CommentResult,CommentSender,HookCommentCommand,StatusCommand,BatchCommentCommand,BatchCommentResult,GetLatestSnsIdCommand,ReadMemoryCommand,ParallelCommentCommand,TlsDiagCommand
 from pyweixin.hook_bridge import HookBridge
 from pyweixin.comment_dispatcher import CommentDispatcher,CircuitBreakerState
