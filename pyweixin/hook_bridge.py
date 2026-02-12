@@ -189,6 +189,8 @@ class HookBridge:
         prefer_arg1_template: bool = True,
         execution_mode: str = "pipe_thread",
         wait_timeout_ms: int = 1500,
+        arg1_mode: str = "template",
+        tls_copy: bool = False,
     ) -> PipeResponse:
         """Send a comment via Hook."""
         return self._send_command(
@@ -200,6 +202,8 @@ class HookBridge:
                 prefer_arg1_template=prefer_arg1_template,
                 execution_mode=execution_mode,
                 wait_timeout_ms=wait_timeout_ms,
+                arg1_mode=arg1_mode,
+                tls_copy=tls_copy,
             )
         )
 

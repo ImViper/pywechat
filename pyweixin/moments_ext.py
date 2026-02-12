@@ -1604,70 +1604,125 @@ def fetch_and_comment_from_moments_feed(
                     print(f'[debug:stream] hook dispatcher init error: {e}')
 
             # 预开编辑器：在等待 AI/OCR 答案期间先点开评论输入框
-            editor_preloaded = False
-            if not _use_hook:
-                try:
-                    editor_preloaded = open_comment_editor(
-                        moments_window, selected_item,
-                        use_offset_fix=False, pre_move_coords=center_point
-                    )
-                    if editor_preloaded:
-                        print('[debug:stream] editor pre-opened while waiting for answers')
-                    else:
-                        print('[debug:stream] editor pre-open failed, will retry per comment')
-                except Exception as e:
-                    print(f'[debug:stream] editor pre-open error: {e}')
-            while True:
-                try:
-                    answer = answer_queue.get(timeout=15)
-                except _queue_mod.Empty:
-                    print('[debug:stream] queue timeout, stopping')
-                    break
-                if answer is None:
-                    print('[debug:stream] sentinel received, all answers processed')
-                    break
-                answer = str(answer).strip()
-                if not answer:
-                    continue
-                all_answers.append(answer)
-                comment_count += 1
-                print(f'[debug:stream] posting comment #{comment_count}: {answer!r}')
-                posted = False
-                # Hook 路径
-                if _use_hook and _hook_dispatcher is not None:
-                    hook_result = _hook_dispatcher.post_comment(
-                        answer, author='',
-                        content_hash=result.get('fingerprint', ''))
-                    posted = hook_result.success
+            hook_batch_mode = os.environ.get(
+                "PYWEIXIN_HOOK_BATCH_MODE", "piggyback"
+            ).strip().lower()
+            use_hook_batch = _use_hook and hook_batch_mode in {"piggyback", "parallel", "serial"}
+
+            # Batch-first path for Hook mode: collect all answers, then send in one batch.
+            if use_hook_batch and _hook_dispatcher is not None:
+                print(f"[debug:stream] hook batch mode={hook_batch_mode}, collecting answers")
+                while True:
+                    try:
+                        answer = answer_queue.get(timeout=15)
+                    except _queue_mod.Empty:
+                        print("[debug:stream] queue timeout, stopping")
+                        break
+                    if answer is None:
+                        print("[debug:stream] sentinel received, all answers processed")
+                        break
+                    answer = str(answer).strip()
+                    if not answer:
+                        continue
+                    all_answers.append(answer)
+
+                comment_count = len(all_answers)
+                if all_answers:
+                    try:
+                        try:
+                            batch_concurrency = int(
+                                os.environ.get("PYWEIXIN_HOOK_MAX_CONCURRENCY", "10")
+                            )
+                        except ValueError:
+                            batch_concurrency = 10
+                        if batch_concurrency < 1:
+                            batch_concurrency = 1
+                        if batch_concurrency > 20:
+                            batch_concurrency = 20
+
+                        batch_result = _hook_dispatcher.post_batch_comments(
+                            all_answers,
+                            author="",
+                            content_hash=result.get("fingerprint", ""),
+                            concurrency=batch_concurrency,
+                        )
+                        posted_any = batch_result.succeeded > 0
+                        print(
+                            f"[debug:stream] batch done: {batch_result.succeeded}/"
+                            f"{batch_result.total} in {batch_result.total_latency_ms}ms"
+                        )
+                        if batch_result.failed > 0 and not result.get('error'):
+                            result['error'] = (
+                                f"hook batch partial failure: "
+                                f"{batch_result.failed}/{batch_result.total}"
+                            )
+                    except Exception as e:
+                        print(f"[debug:stream] hook batch error: {e}")
+            else:
+                # Original streaming path: post each answer immediately.
+                editor_preloaded = False
+                if not _use_hook:
+                    try:
+                        editor_preloaded = open_comment_editor(
+                            moments_window, selected_item,
+                            use_offset_fix=False, pre_move_coords=center_point
+                        )
+                        if editor_preloaded:
+                            print("[debug:stream] editor pre-opened while waiting for answers")
+                        else:
+                            print("[debug:stream] editor pre-open failed, will retry per comment")
+                    except Exception as e:
+                        print(f"[debug:stream] editor pre-open error: {e}")
+                while True:
+                    try:
+                        answer = answer_queue.get(timeout=15)
+                    except _queue_mod.Empty:
+                        print("[debug:stream] queue timeout, stopping")
+                        break
+                    if answer is None:
+                        print("[debug:stream] sentinel received, all answers processed")
+                        break
+                    answer = str(answer).strip()
+                    if not answer:
+                        continue
+                    all_answers.append(answer)
+                    comment_count += 1
+                    print(f"[debug:stream] posting comment #{comment_count}: {answer!r}")
+                    posted = False
+                    # Hook path
+                    if _use_hook and _hook_dispatcher is not None:
+                        hook_result = _hook_dispatcher.post_comment(
+                            answer, author="",
+                            content_hash=result.get("fingerprint", ""))
+                        posted = hook_result.success
+                        if not posted:
+                            print(f"[debug:stream] hook failed, falling back to UI")
+                            _use_hook = False
+                    # UI fallback path
                     if not posted:
-                        print(f'[debug:stream] hook failed, falling back to UI')
-                        _use_hook = False
-                # UI 路径（原有逻辑不变）
-                if not posted:
-                    if comment_count == 1 and editor_preloaded:
-                        # 编辑器已预开，直接粘贴发送，跳过编辑器检测
-                        posted = paste_and_send_comment(
-                            moments_window, answer,
-                            anchor_mode='list', anchor_source=comment_listitem,
-                            clear_first=False, skip_editor_check=True
-                        )
+                        if comment_count == 1 and editor_preloaded:
+                            posted = paste_and_send_comment(
+                                moments_window, answer,
+                                anchor_mode="list", anchor_source=comment_listitem,
+                                clear_first=False, skip_editor_check=True
+                            )
+                        else:
+                            if comment_count > 1:
+                                try:
+                                    comment_listitem = resolve_feed_comment_anchor(moments_list, selected_item)
+                                except Exception:
+                                    pass
+                            posted = comment_flow(
+                                moments_window, selected_item, [answer],
+                                anchor_mode="list", anchor_source=comment_listitem,
+                                use_offset_fix=False, clear_first=False,
+                                pre_move_coords=center_point
+                            )
+                    if posted:
+                        posted_any = True
+                        print(f"[debug:stream] comment #{comment_count} posted OK")
                     else:
-                        if comment_count > 1:
-                            try:
-                                comment_listitem = resolve_feed_comment_anchor(moments_list, selected_item)
-                            except Exception:
-                                pass
-                        posted = comment_flow(
-                            moments_window, selected_item, [answer],
-                            anchor_mode='list', anchor_source=comment_listitem,
-                            use_offset_fix=False, clear_first=False,
-                            pre_move_coords=center_point
-                        )
-                if posted:
-                    posted_any = True
-                    print(f'[debug:stream] comment #{comment_count} posted OK')
-                else:
-                    print(f'[debug:stream] comment #{comment_count} post FAILED')
+                        print(f"[debug:stream] comment #{comment_count} post FAILED")
 
             total_ms = int((time.time() - parallel_start) * 1000)
             print(f'[debug:main] streaming done: {comment_count} comments, {total_ms}ms total')

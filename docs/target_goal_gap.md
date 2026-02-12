@@ -1,7 +1,7 @@
 # 目标差距记录（命中后 10 条评论 < 1 秒）
 
 更新时间：2026-02-10（按最新代码扫描）
-流程图：`docs/hook_flow_overview.md`
+流程图：`docs/hook/hook_flow_overview.md`
 
 ## 1. 最终目标
 

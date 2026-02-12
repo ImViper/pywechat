@@ -73,6 +73,8 @@ class CommentCommand(PipeCommand):
     prefer_arg1_template: bool = True
     execution_mode: str = "pipe_thread"
     wait_timeout_ms: int = 1500
+    arg1_mode: str = "template"
+    tls_copy: bool = False
     cmd: str = field(default="comment", init=False)
 
     def _as_dict(self) -> dict[str, Any]:
@@ -85,6 +87,8 @@ class CommentCommand(PipeCommand):
             prefer_arg1_template=self.prefer_arg1_template,
             execution_mode=self.execution_mode,
             wait_timeout_ms=self.wait_timeout_ms,
+            arg1_mode=self.arg1_mode,
+            tls_copy=self.tls_copy,
         )
         return d
 
@@ -274,6 +278,11 @@ class BatchCommentResult:
     failed: int = 0
     total_latency_ms: int = 0
     results: list[CommentResult] = field(default_factory=list)
+    mode: str = ""
+    raw_batch_total: int = 0
+    raw_batch_succeeded: int = 0
+    raw_batch_failed: int = 0
+    fallback_count: int = 0
 
 
 # ---------------------------------------------------------------------------

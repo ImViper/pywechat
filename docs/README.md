@@ -1,27 +1,25 @@
-﻿# Docs Index
+﻿# Docs 导航（当前执行版）
+更新时间：2026-02-12
 
-本目录按“核心文档 / 归档文档”维护，避免多份进度文档互相冲突。
+## 先看这 2 份（日常固定入口）
+1. `docs/ecosystem_research_and_route_a_plan.md`
+   - 生态调研结论 + 路线 A（Hook 并行）实施计划。**当前主线。**
+2. `docs/hook/hook_e2e_acceptance_guide.md`
+   - 跑数命令参数、报告字段解释（含 `raw_batch_*`、`fallback_count`）。
 
-## 核心文档（持续维护）
+## 当前阶段主线（强约束）
+1. **主线回归 Hook 并行优化**：piggyback + TLS accessor 覆盖 → 并行 <1s。
+2. 纯 HTTP 路线降为 P3 长期储备，不再作为冲刺目标。
+3. 实施计划分 5 阶段，详见 `docs/ecosystem_research_and_route_a_plan.md` 第四节。
 
-1. `docs/moments_rush_guide.md`：朋友圈监听、识别、评论主流程与运行手册。
-2. `docs/hook_comment_research.md`：Hook 评论链路的架构与实现现状（代码对齐）。
-3. `docs/hook_progress.md`：当前阶段进度、已完成项、待办与风险。
-4. `docs/target_goal_gap.md`：最终目标（10 条 < 1 秒）与现实差距、验收口径。
-5. `docs/hook_flow_overview.md`：当前链路流程图（端到端、发送分支、批量并发）。
-6. `docs/tls_crash_analysis.md`：并行评论场景下的 TLS 崩溃根因分析与方案状态。
-7. `docs/testing_dataset_guide.md`：统一测评入口与指标说明。
-8. `docs/fork_sync_guide.md`：Fork 与上游同步规范。
+## 全量文档分类索引（完整）
+查看：`docs/DOCS_REFERENCE_MAP.md`
 
-## 归档文档（历史记录，不作为当前默认方案）
+## 快速选读（按问题）
+1. 我只想知道下一步做什么：`docs/ecosystem_research_and_route_a_plan.md`
+2. 我只想看这次是否达标：`docs/hook/hook_e2e_acceptance_guide.md`
+3. 生态调研（其他项目怎么做的）：`docs/ecosystem_research_and_route_a_plan.md` 第一节
+4. 想看 Hook 技术细节：`docs/hook/hook_comment_research.md`、`docs/hook/tls_crash_analysis.md`
+5. 想看历史纯 HTTP 尝试：`docs/native_http_protocol_recon.md`、`docs/native_http_sender_design.md`
+6. 想追溯旧方案与旧排障：`docs/archive/README.md`
 
-1. `docs/archive/hook_thread_diag_log_2026-02-10.md`：pipe_thread 崩溃诊断全过程日志。
-2. `docs/archive/2026-02-10_1s10comments_plan.md`：2026-02-10 当日的 1 秒 10 条方案草案。
-3. `docs/archive/external_repo_research_2026-02-09.md`：外部仓库调研记录。
-
-## 维护约定
-
-1. 架构设计与接口说明优先更新 `hook_comment_research.md`。
-2. 阶段性状态与待办只在 `hook_progress.md` 维护，避免多份“进度文档”。
-3. 目标差距与验收标准只在 `target_goal_gap.md` 维护。
-4. 临时排障日志统一进入 `docs/archive/`。
