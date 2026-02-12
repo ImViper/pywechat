@@ -1641,7 +1641,7 @@ def fetch_and_comment_from_moments_feed(
                             try:
                                 first_result = _hook_dispatcher.post_comment(
                                     first_answer,
-                                    author="",
+                                    author=result.get("author", ""),
                                     content_hash=result.get("fingerprint", "")[:16],
                                 )
                                 posted_any = first_result.success
@@ -1695,7 +1695,7 @@ def fetch_and_comment_from_moments_feed(
 
                             batch_result = _hook_dispatcher.post_batch_comments(
                                 remaining,
-                                author="",
+                                author=result.get("author", ""),
                                 content_hash=result.get("fingerprint", "")[:16],
                                 concurrency=batch_concurrency,
                             )
