@@ -185,6 +185,8 @@ T=1300ms  收集完成，批量发送剩余 3 条评论
 - 总耗时：1.3 秒
 ```
 
+注：实现上 `ai_callback` 会先启动，并传入 `DeferredImagePaths`；图片提取完成后再调用 `DeferredImagePaths.set(image_paths)`，OCR/AI 才开始处理。TemplateMatch/散弹等不依赖图片的 source 可在图片就绪前直接产出。
+
 ## 后续优化方向
 
 1. **动态评论生成器**：基于题目类型生成个性化评论

@@ -66,7 +66,9 @@ $env:PYWEIXIN_OCR_LIMIT_TYPE='max'
 
 ## 3. 运行入口
 
-唯一推荐入口：`examples/run_feed_refresh_listener.py`
+推荐入口（基础单评论）：`examples/run_feed_refresh_listener.py`
+
+多评论监听（fast_first_batch）：`examples/run_feed_multi_comment_listener.py`（详见 `docs/multi_comment_listener_guide.md`）
 
 ```powershell
 python examples/run_feed_refresh_listener.py <发布时间HH:MM> <目标作者> [轮询秒数] [--suffix 性别]
