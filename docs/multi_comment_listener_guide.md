@@ -66,6 +66,35 @@ python examples/run_feed_multi_comment_listener.py 19:15 小蔡 ^
 
 **效果**：最多发送 5 条评论，包含所有来源的答案
 
+### 场景 5：已知答案即时首评
+
+```bash
+python examples/run_feed_multi_comment_listener.py 19:15 小蔡 ^
+    --known-answers config/known_answers.json
+```
+
+**效果**：使用已知答案 JSON 文件，第一条评论可在 OCR/AI 完成前发出（毫秒级）
+
+### 场景 6：禁用数学题和散弹猜测
+
+```bash
+python examples/run_feed_multi_comment_listener.py 19:15 小蔡 ^
+    --no-math ^
+    --no-guess
+```
+
+**效果**：只使用 OCR/AI/模板匹配，不自动解题和猜测数字
+
+### 场景 7：自定义散弹范围 + 模板匹配
+
+```bash
+python examples/run_feed_multi_comment_listener.py 19:15 小蔡 ^
+    --guess-range "1,10" ^
+    --rush-config config/rush_event.json
+```
+
+**效果**：发送 1男~10男，更大范围覆盖；使用自定义模板配置文件
+
 ## 命令行参数
 
 | 参数 | 类型 | 默认值 | 说明 |
@@ -77,6 +106,11 @@ python examples/run_feed_multi_comment_listener.py 19:15 小蔡 ^
 | `--canned` | string | None | 预制话术（逗号分隔） |
 | `--ocr-retry` | flag | False | 启用 OCR 重试 |
 | `--max-comments` | int | 5 | 每帖最多评论数 |
+| `--known-answers` | string | None | 已知答案 JSON 路径，实现即时首评 |
+| `--no-math` | flag | False | 禁用数学题自动求解 |
+| `--rush-config` | string | None | 模板匹配配置文件路径 (`rush_event.json`) |
+| `--guess-range` | string | "3,7" | 散弹射击范围（如 "3,7" = 发送 3男,4男,...,7男） |
+| `--no-guess` | flag | False | 禁用数字散弹猜测 |
 
 ## 环境变量配置
 
@@ -185,7 +219,14 @@ T=1300ms  收集完成，批量发送剩余 3 条评论
 - 总耗时：1.3 秒
 ```
 
-注：实现上 `ai_callback` 会先启动，并传入 `DeferredImagePaths`；图片提取完成后再调用 `DeferredImagePaths.set(image_paths)`，OCR/AI 才开始处理。TemplateMatch/散弹等不依赖图片的 source 可在图片就绪前直接产出。
+### DeferredImagePaths 机制
+
+实现上 `ai_callback` 会先启动，并传入 `DeferredImagePaths`；图片提取完成后再调用 `DeferredImagePaths.set(image_paths)`，OCR/AI 才开始处理。TemplateMatch/散弹等不依赖图片的 source 可在图片就绪前直接产出。
+
+优势：
+- **更短的首评延迟**：不依赖图片提取完成，回调立即启动
+- **并行处理**：图片提取与 OCR/AI 初始化并行执行
+- **资源优化**：OCR/AI 只在图片就绪后才开始处理，避免空转
 
 ## 后续优化方向
 
