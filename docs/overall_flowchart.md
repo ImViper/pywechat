@@ -1,4 +1,4 @@
-# 整体流程图（多评论监听）
+﻿# 整体流程图（多评论监听）
 
 ```mermaid
 flowchart TD
@@ -10,8 +10,12 @@ flowchart TD
 
     F --> G[打开/复用朋友圈窗口]
     G --> H[fetch_and_comment_from_moments_feed]
-    H --> I[抓取目标帖子\n校验 author + fingerprint\n提取图片]
-    I --> J[启动多源并发生成\ncreate_multi_source_streaming_callback]
+
+    H --> I[抓取目标帖子\n校验 author + fingerprint]
+
+    %% 关键顺序：先启动多源回调（DeferredImagePaths），再并行提取图片并 set()
+    I --> J[启动多源并发生成\ncreate_multi_source_streaming_callback\n(ai_callback(content, DeferredImagePaths))]
+    I --> I2[提取图片\nDeferredImagePaths.set(image_paths)]
     J --> Q[(答案队列 Queue)]
 
     H --> K{Hook Dispatcher 可用?}
@@ -24,7 +28,7 @@ flowchart TD
     O --> P[批量发送剩余\npost_batch_comments Serial]
     L -->|piggyback/parallel/serial| R[收集全部答案后批量发送]
 
-    U --> V[预开评论编辑器]
+    U --> V[预打开评论编辑器]
     V --> W[逐条从 Queue 取答案并发送]
 
     Q --> M
