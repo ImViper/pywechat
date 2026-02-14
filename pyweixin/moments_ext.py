@@ -1492,6 +1492,7 @@ def fetch_and_comment_from_moments_feed(
                 print(f'[debug:stream] hook dispatcher init error: {e}')
 
         first_comment_done = False
+        instant_first_answer = None  # if we manage to post an instant answer pre-image, store it for dedup/reporting
         
         # [Optimization] Instant Text-Match Comment (Zero Latency)
         # Check if the text content matches any known answer or simple math BEFORE starting AI.
@@ -1553,6 +1554,7 @@ def fetch_and_comment_from_moments_feed(
                     if hr.success:
                          print(f"[debug:stream] Instant Hook success: {instant_answer}")
                          first_comment_done = True
+                         instant_first_answer = instant_answer
                     else:
                          print(f"[debug:stream] Instant Hook failed: {hr.error_message}")
             except Exception as e:
@@ -1751,13 +1753,14 @@ def fetch_and_comment_from_moments_feed(
                     # ============================================================
                     print("[debug:stream] fast_first_batch mode: waiting for first answer")
                     
+                    first_answer = None
                     if first_comment_done:
                         print("[debug:stream] first answer already sent pre-image, skipping wait")
-                        # We don't have the first_answer string here easily unless we stored it,
-                        # but we can rely on subsequent answers being in the queue.
-                        # Actually, we should probably just proceed to collection.
+                        first_answer = instant_first_answer
                         posted_any = True
                         comment_count = 1
+                        if first_answer:
+                            all_answers.append(first_answer)
                     else:
                         first_answer = None
                         first_start = time.time()
