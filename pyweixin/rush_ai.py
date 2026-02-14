@@ -396,7 +396,7 @@ class ArkChatProvider:
     """
 
     api_key: str | None = None
-    model: str = "doubao-seed-1-8-251228"
+    model: str = "doubao-seed-2-0-pro-260215"
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     system_prompt: str = (
         "抢答助手。只输出答案，不解释.\\n"
@@ -538,7 +538,7 @@ class ArkResponsesProvider:
     """
 
     api_key: str | None = None
-    model: str = "doubao-seed-1-8-251228"
+    model: str = "doubao-seed-2-0-pro-260215"
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     system_prompt: str = (
         "你是朋友圈抢答助手。要求：\n"

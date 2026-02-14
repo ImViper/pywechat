@@ -396,7 +396,7 @@ def build_ai_provider(
         return (
             ArkChatProvider(
                 api_key=api_key,
-                model=(model or "doubao-seed-1-8-251228"),
+                model=(model or "doubao-seed-2-0-pro-260215"),
                 base_url=(base_url or "https://ark.cn-beijing.volces.com/api/v3"),
             ),
             "ark",

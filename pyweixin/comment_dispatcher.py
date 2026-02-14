@@ -85,6 +85,31 @@ class HookCommentSender:
     def bridge(self) -> HookBridge:
         return self._bridge
 
+    def is_hook_ready(self) -> bool:
+        """Check if the hook is installed and the state is captured."""
+        try:
+            # ping checks if the bridge is alive, status checks the hook state.
+            status_resp = self._bridge.status()
+            if status_resp.ok:
+                data = status_resp.data
+                ready = bool(data.get("hook_installed")) and bool(
+                    data.get("state_captured")
+                )
+                return ready
+        except Exception:
+            pass
+        return False
+
+    def get_capture_thread_id(self) -> int:
+        """Get the capture thread ID from the DLL."""
+        try:
+            status_resp = self._bridge.status()
+            if status_resp.ok:
+                return int(status_resp.data.get("capture_thread_id", 0))
+        except Exception:
+            pass
+        return 0
+
     def send_comment(
         self,
         content: str,
@@ -105,6 +130,18 @@ class HookCommentSender:
             latest = self._bridge.get_latest_sns_id()
             if latest.ok:
                 effective_sns_id = latest.data.get("sns_id", "")
+
+        # Optimization: if using capture_thread but no capture thread id is found,
+        # fail early to avoid the wait_timeout_ms (usually 400ms).
+        if self._execution_mode == "capture_thread":
+            tid = self.get_capture_thread_id()
+            if tid == 0:
+                return CommentResult(
+                    success=False,
+                    method="hook",
+                    error_code=HookErrorCode.SNS_ID_NOT_FOUND,
+                    error_message="capture_thread_id is 0, state not captured yet",
+                )
 
         resp = self._bridge.send_comment(
             content,
@@ -594,6 +631,14 @@ class CommentDispatcher:
         batch_mode = os.environ.get("PYWEIXIN_HOOK_BATCH_MODE", "piggyback").strip().lower()
         if batch_mode not in {"piggyback", "parallel", "serial"}:
             batch_mode = "piggyback"
+
+        # Auto-upgrade optimization: if batch mode is piggyback but the hook is READY
+        # (state captured), upgrade to parallel mode immediately. Parallel mode
+        # is faster (no UI bootstrap) and is safe once state is captured.
+        if batch_mode == "piggyback" and self._hook_sender is not None:
+            if self._hook_sender.is_hook_ready():
+                print("[batch-dispatch] Hook ready (state captured), upgrading piggyback -> parallel")
+                batch_mode = "parallel"
 
         try:
             piggyback_timeout_ms = int(

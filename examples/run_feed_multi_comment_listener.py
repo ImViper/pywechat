@@ -46,8 +46,11 @@ from pyweixin.rush_callback_multi import (
     AICommentSource,
     CannedCommentSource,
     OCRRetryCommentSource,
+    TemplateMatchCommentSource,
+    NumberGuessCommentSource,
     create_multi_source_streaming_callback,
 )
+from pyweixin.rush_engine import load_rush_config
 from pyweixin.moments_ext import fetch_and_comment_from_moments_feed
 from pyweixin.WeChatTools import Navigator
 
@@ -85,6 +88,26 @@ def main() -> None:
     )
     parser.add_argument(
         "--max-comments", type=int, default=5, help="Max comments per post (default: 5)"
+    )
+    parser.add_argument(
+        "--known-answers", type=str, default=None,
+        help="Path to known_answers.json for instant first comment"
+    )
+    parser.add_argument(
+        "--no-math", action="store_true",
+        help="Disable automatic math problem solving"
+    )
+    parser.add_argument(
+        "--rush-config", type=str, default=None,
+        help="Path to rush_event.json for template matching"
+    )
+    parser.add_argument(
+        "--guess-range", type=str, default="3,7",
+        help="Scatter shot number range (default: 3,7 = post 3男,4男,...,7男)"
+    )
+    parser.add_argument(
+        "--no-guess", action="store_true",
+        help="Disable number scatter shot guessing"
     )
 
     args = parser.parse_args()
@@ -136,13 +159,94 @@ def main() -> None:
     except Exception:
         print("Warning: PaddleOCR unavailable, OCR disabled")
 
+    # ----------------------------------------------------------------
+    # Auto-inject Hook DLL (default enabled)
+    # ----------------------------------------------------------------
+    if os.environ.get("PYWEIXIN_HOOK_ENABLED") is None:
+        os.environ["PYWEIXIN_HOOK_ENABLED"] = "1"  # 默认启用 Hook
+
+    if os.environ.get("PYWEIXIN_HOOK_ENABLED", "0") == "1":
+        try:
+            from pyweixin.hook_injector import find_wechat_pid, inject_dll, is_dll_loaded
+
+            wechat_pid = find_wechat_pid()
+            if wechat_pid:
+                if is_dll_loaded(wechat_pid):
+                    print(f"Hook DLL already loaded in WeChat (pid={wechat_pid})")
+                else:
+                    dll_path = str(PROJECT_ROOT / "hook" / "build" / "bin" / "Release" / "pywechat_hook.dll")
+                    if os.path.isfile(dll_path):
+                        print(f"Injecting Hook DLL into WeChat (pid={wechat_pid})...")
+                        inject_dll(wechat_pid, dll_path)
+                        time.sleep(0.5)  # 等待 DLL 初始化 Named Pipe
+                        print(f"Hook DLL injected OK")
+                    else:
+                        print(f"Warning: Hook DLL not found at {dll_path}")
+            else:
+                print("Warning: WeChat process not found, Hook disabled")
+        except Exception as exc:
+            print(f"Warning: Hook DLL injection failed: {exc}")
+
     # Build comment sources
     known_keywords = [
         "百里辞", "楚凭阑", "晋王", "晏如晦", "从嘉", "方驰",
         "耶律洪", "萧寻", "红袖", "胡不医", "顾知意", "赵岚",
     ]
 
+    # Load rush_event.json templates (for TemplateMatch non-COUNT matching)
+    rush_templates = []
+    rush_config_path = args.rush_config or str(PROJECT_ROOT / "config" / "rush_event.json")
+    if os.path.isfile(rush_config_path):
+        try:
+            rush_cfg = load_rush_config(rush_config_path)
+            rush_templates = rush_cfg.templates
+            print(f"Loaded {len(rush_templates)} templates from {rush_config_path}")
+        except Exception as exc:
+            print(f"Warning: failed to load rush config: {exc}")
+
+    # Load known answers for instant first comment
+    known_answers: dict[str, str] = {}
+    known_answers_path = args.known_answers
+    if not known_answers_path:
+        # Auto-detect config/known_answers.json
+        default_ka = PROJECT_ROOT / "config" / "known_answers.json"
+        if default_ka.exists():
+            known_answers_path = str(default_ka)
+    if known_answers_path:
+        known_answers = TemplateMatchCommentSource.load_known_answers(known_answers_path)
+        if known_answers:
+            print(f"Loaded {len(known_answers)} known answers from {known_answers_path}")
+
     sources = []
+
+    # Source -1: NumberGuess scatter shot (priority -2, queue_priority 20)
+    if not args.no_guess and answer_suffix:
+        try:
+            gmin, gmax = [int(x.strip()) for x in args.guess_range.split(",")]
+        except ValueError:
+            gmin, gmax = 3, 7
+        sources.append(
+            NumberGuessCommentSource(
+                guess_range=(gmin, gmax),
+                suffix=answer_suffix,
+            )
+        )
+        print(f"NumberGuess enabled: range={gmin}-{gmax}, suffix={answer_suffix!r}")
+
+    # Source 0: TemplateMatch (priority -1, instant ~0ms)
+    enable_math = not args.no_math
+    if rush_templates or known_answers or enable_math:
+        sources.append(
+            TemplateMatchCommentSource(
+                templates=rush_templates,
+                known_answers=known_answers,
+                known_keywords=known_keywords,
+                answer_suffix=answer_suffix,
+                enable_math=enable_math,
+            )
+        )
+        print(f"TemplateMatch enabled: known_answers={len(known_answers)}, "
+              f"templates={len(rush_templates)}, math={enable_math}")
 
     # Source 1: OCR (priority 0, fastest)
     if ocr_provider:
@@ -150,7 +254,7 @@ def main() -> None:
             OCRCommentSource(ocr_provider, known_keywords, answer_suffix)
         )
 
-    # Source 2: AI (priority 1)
+    # Source 2: AI (priority 1, queue_priority 0 = 最高优先级！)
     if ai_provider:
         sources.append(AICommentSource(ai_provider))
 
@@ -175,6 +279,7 @@ def main() -> None:
     ai_callback = create_multi_source_streaming_callback(
         sources=sources,
         max_comments=max_comments,
+        max_guess_comments=5,
         dedup=True,
         verbose=True,
     )

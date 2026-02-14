@@ -1463,6 +1463,137 @@ def fetch_and_comment_from_moments_feed(
         os.makedirs(run_folder, exist_ok=True)
         result['detail_folder'] = run_folder
 
+        result['success'] = True
+
+        # Hook 路径（默认启用，无需环境变量）
+        # Force enable Hook if not explicitly disabled.
+        if os.environ.get('PYWEIXIN_HOOK_ENABLED') is None:
+            os.environ['PYWEIXIN_HOOK_ENABLED'] = '1'
+
+        _hook_dispatcher = None
+        _use_hook = False
+        if os.environ.get('PYWEIXIN_HOOK_ENABLED', '0') == '1':
+            try:
+                from .comment_dispatcher import CommentDispatcher
+                # 注意：此时还没有 comment_listitem (是在 reacquire 后才有的)，
+                # 但 Hook 发送并不依赖 anchor_source (除非 UI fallback)。
+                # 这里主要为了拿 _hook_sender。如果 fall back UI，需要后续 re-init 或传入。
+                # 暂时先用 None 初始化 UI sender 相关的部分，仅用于 Hook。
+                _hook_dispatcher = CommentDispatcher.from_env(
+                    moments_window=moments_window, 
+                    content_item=None, # 暂时拿不到
+                    anchor_mode='list', 
+                    anchor_source=None, 
+                )
+                _use_hook = _hook_dispatcher._hook_sender is not None
+                if _use_hook:
+                    print('[debug:stream] hook dispatcher active (pre-init)')
+            except Exception as e:
+                print(f'[debug:stream] hook dispatcher init error: {e}')
+
+        first_comment_done = False
+        
+        # [Optimization] Instant Text-Match Comment (Zero Latency)
+        # Check if the text content matches any known answer or simple math BEFORE starting AI.
+        if _use_hook and _hook_dispatcher:
+            try:
+                from pyweixin.rush_callback_multi import TemplateMatchCommentSource
+                from pyweixin.rush_types import QuestionTemplate
+                import json
+                
+                # Load configs manually
+                config_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config")
+                known_answers_path = os.path.join(config_dir, "known_answers.json")
+                rush_event_path = os.path.join(config_dir, "rush_event.json")
+                
+                # Load known answers
+                known_answers = {}
+                if os.path.isfile(known_answers_path):
+                    try:
+                        with open(known_answers_path, 'r', encoding='utf-8-sig') as f:
+                            known_answers = json.load(f)
+                    except Exception as e:
+                        print(f"[debug:stream] failed to load known_answers: {e}")
+
+                # Load templates
+                templates = []
+                if os.path.isfile(rush_event_path):
+                    try:
+                        with open(rush_event_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            # rush_event.json structure might be list or dict with "templates"
+                            # rush_config usually has "templates": [...]
+                            # If it's a list directly:
+                            raw_list = []
+                            if isinstance(data, list):
+                                raw_list = data
+                            elif isinstance(data, dict):
+                                raw_list = data.get("templates", [])
+                            
+                            for item in raw_list:
+                                templates.append(QuestionTemplate.from_mapping(item))
+                    except Exception as e:
+                        print(f"[debug:stream] failed to load templates: {e}")
+
+                tm_source = TemplateMatchCommentSource(
+                    known_answers=known_answers,
+                    templates=templates,
+                    enable_math=True
+                )
+                
+                instant_answer = tm_source.generate(text_for_filter, [])
+                if instant_answer:
+                    instant_answer = str(instant_answer).strip()
+                    print(f"[debug:stream] Instant Text-Match found: {instant_answer}")
+                    hr = _hook_dispatcher.post_comment(
+                        instant_answer,
+                        author=target_author if target_author else "",
+                        content_hash=result.get("fingerprint", "")[:16],
+                    )
+                    if hr.success:
+                         print(f"[debug:stream] Instant Hook success: {instant_answer}")
+                         first_comment_done = True
+                    else:
+                         print(f"[debug:stream] Instant Hook failed: {hr.error_message}")
+            except Exception as e:
+                print(f"[debug:stream] Instant Text-Match check failed: {e}")
+
+        import queue as _queue_mod
+        print('[debug:main] starting ai_callback with deferred images')
+        parallel_start = time.time()
+
+        # --- 延迟图片传递：先启动 callback（散弹/模板立即执行），图片后续传入 ---
+        from pyweixin.rush_callback_multi import DeferredImagePaths
+        _deferred_images = DeferredImagePaths()
+        cb_result = ai_callback(content, _deferred_images)
+        is_streaming = hasattr(cb_result, 'get')  # queue.Queue or PriorityAnswerQueue
+
+        # --- 图片提取（在 callback 启动之后） ---
+        
+        # [Optimization] Pre-Image Hook Attempt (Secondary check if Instant failed/missed)
+        # Try to catch instant answers (e.g. OCR templates) and fire Hook comment
+        if not first_comment_done and is_streaming and _hook_dispatcher is not None and _use_hook:
+            try:
+                # Peek for answer with tiny timeout (50ms)
+                pre_answer = cb_result.get(timeout=0.05)
+                pre_answer_str = str(pre_answer).strip()
+                if pre_answer_str:
+                    print(f"[debug:stream] pre-image answer ready: {pre_answer_str}")
+                    # Try Hook immediately
+                    hr = _hook_dispatcher.post_comment(
+                        pre_answer_str,
+                        author=result.get("author", ""),
+                        content_hash=result.get("fingerprint", "")[:16],
+                    )
+                    if hr.success:
+                        print(f"[debug:stream] pre-image hook success: {pre_answer_str}")
+                        first_comment_done = True
+                    else:
+                        print(f"[debug:stream] pre-image hook failed: {hr.error_message}")
+                        cb_result.put(pre_answer)
+            except _queue_mod.Empty:
+                pass  # No instant answer, proceed to image extraction
+
         if image_count > 0:
             try:
                 rect = selected_item.rectangle()
@@ -1475,21 +1606,20 @@ def fetch_and_comment_from_moments_feed(
                 ]
                 opened = False
                 img_start = time.time()
+                _extracted_paths = []
                 for open_pos in open_candidates:
                     try:
                         mouse.click(coords=open_pos)
                         time.sleep(0.08)
-                        # Verify viewer opened via right-click menu check
                         mouse.right_click(coords=viewer_right_click_pos)
                         copy_menu = moments_window.child_window(**MenuItems.CopyMenuItem)
                         if copy_menu.exists(timeout=0.15):
-                            # Viewer confirmed open - dismiss menu, screenshot instead of clipboard copy
                             pyautogui.press('esc')
                             time.sleep(0.03)
                             first_img_path = os.path.join(run_folder, '0.png')
                             moments_window.capture_as_image().save(first_img_path)
                             if os.path.isfile(first_img_path):
-                                result['image_paths'].append(first_img_path)
+                                _extracted_paths.append(first_img_path)
                                 opened = True
                                 for i in range(1, image_count):
                                     pyautogui.press('right', interval=0.08)
@@ -1497,29 +1627,23 @@ def fetch_and_comment_from_moments_feed(
                                     img_path = os.path.join(run_folder, f'{i}.png')
                                     moments_window.capture_as_image().save(img_path)
                                     if os.path.isfile(img_path):
-                                        result['image_paths'].append(img_path)
+                                        _extracted_paths.append(img_path)
                             break
                     finally:
                         pyautogui.press('esc')
                         time.sleep(0.05)
                 img_elapsed = int((time.time() - img_start) * 1000)
-                print(f'[debug:img] extracted {len(result["image_paths"])}/{image_count} images ({img_elapsed}ms)')
+                result['image_paths'] = _extracted_paths
+                print(f'[debug:img] extracted {len(_extracted_paths)}/{image_count} images ({img_elapsed}ms)')
                 if (not opened) and image_count > 0:
                     result['error'] = 'list mode cannot extract images, skipped'
-                    result['success'] = True
-                    return result
+                # 通知 OCR/AI：图片就绪
+                _deferred_images.set(_extracted_paths)
             except Exception as e:
                 result['error'] = f'list image extraction failed: {e}'
-                result['success'] = True
-                return result
-
-        result['success'] = True
-
-        import queue as _queue_mod
-        print('[debug:main] starting ai_callback + reacquire in parallel')
-        parallel_start = time.time()
-        cb_result = ai_callback(content, result['image_paths'])
-        is_streaming = isinstance(cb_result, _queue_mod.Queue)
+                _deferred_images.set([])  # 通知 OCR/AI：无图片
+        else:
+            _deferred_images.set([])  # 无图片
 
         if is_streaming:
             answer_queue = cb_result
@@ -1560,6 +1684,10 @@ def fetch_and_comment_from_moments_feed(
                     # 验证作者匹配，防止评论到错误的帖子
                     if target_author and not item_text.startswith(target_author):
                         print(f'[debug:reacquire] skipped (author mismatch): {item_text}')
+                        continue
+                    # 验证内容关键字，防止评论到非问题帖子
+                    if include_keywords and not any(kw in item_text for kw in include_keywords):
+                        print(f'[debug:reacquire] skipped (no keyword match): {item_text}')
                         continue
                     selected_item = candidates[0]
                     print(f'[debug:reacquire] found valid item: {item_text}')
@@ -1622,39 +1750,47 @@ def fetch_and_comment_from_moments_feed(
                     # 4. Batch post remaining in Serial Mode
                     # ============================================================
                     print("[debug:stream] fast_first_batch mode: waiting for first answer")
+                    
+                    if first_comment_done:
+                        print("[debug:stream] first answer already sent pre-image, skipping wait")
+                        # We don't have the first_answer string here easily unless we stored it,
+                        # but we can rely on subsequent answers being in the queue.
+                        # Actually, we should probably just proceed to collection.
+                        posted_any = True
+                        comment_count = 1
+                    else:
+                        first_answer = None
+                        first_start = time.time()
+                        try:
+                            first_answer = answer_queue.get(timeout=2.0)  # 最多等 2 秒
+                            first_elapsed = int((time.time() - first_start) * 1000)
+                            print(f"[debug:stream] first answer ready ({first_elapsed}ms): {first_answer}")
+                        except _queue_mod.Empty:
+                            print("[debug:stream] first answer timeout, fallback to batch")
 
-                    first_answer = None
-                    first_start = time.time()
-                    try:
-                        first_answer = answer_queue.get(timeout=2.0)  # 最多等 2 秒
-                        first_elapsed = int((time.time() - first_start) * 1000)
-                        print(f"[debug:stream] first answer ready ({first_elapsed}ms): {first_answer}")
-                    except _queue_mod.Empty:
-                        print("[debug:stream] first answer timeout, fallback to batch")
+                        posted_any = False
 
-                    posted_any = False
-
-                    # Post first answer immediately
-                    if first_answer:
-                        first_answer = str(first_answer).strip()
+                        # Post first answer immediately
                         if first_answer:
-                            try:
-                                first_result = _hook_dispatcher.post_comment(
-                                    first_answer,
-                                    author=result.get("author", ""),
-                                    content_hash=result.get("fingerprint", "")[:16],
-                                )
-                                posted_any = first_result.success
-                                comment_count = 1
-                                all_answers.append(first_answer)
+                            first_answer = str(first_answer).strip()
+                            if first_answer:
+                                try:
+                                    first_result = _hook_dispatcher.post_comment(
+                                        first_answer,
+                                        author=result.get("author", ""),
+                                        content_hash=result.get("fingerprint", "")[:16],
+                                    )
+                                    posted_any = first_result.success
+                                    comment_count = 1
+                                    all_answers.append(first_answer)
 
-                                if first_result.success:
-                                    print(f"[debug:stream] first comment posted via {first_result.method}: {first_answer}")
-                                else:
-                                    print(f"[debug:stream] first comment failed: {first_result.error_message}")
+                                    if first_result.success:
+                                        print(f"[debug:stream] first comment posted via {first_result.method}: {first_answer}")
+                                    else:
+                                        print(f"[debug:stream] first comment failed: {first_result.error_message}")
 
-                            except Exception as exc:
-                                print(f"[debug:stream] first comment exception: {exc}")
+                                except Exception as exc:
+                                    print(f"[debug:stream] first comment exception: {exc}")
 
                     # Collect remaining answers (non-blocking with timeout)
                     remaining = []
@@ -1725,38 +1861,38 @@ def fetch_and_comment_from_moments_feed(
                             continue
                         all_answers.append(answer)
 
-                comment_count = len(all_answers)
-                if all_answers:
-                    try:
+                    comment_count = len(all_answers)
+                    if all_answers:
                         try:
-                            batch_concurrency = int(
-                                os.environ.get("PYWEIXIN_HOOK_MAX_CONCURRENCY", "10")
-                            )
-                        except ValueError:
-                            batch_concurrency = 10
-                        if batch_concurrency < 1:
-                            batch_concurrency = 1
-                        if batch_concurrency > 20:
-                            batch_concurrency = 20
+                            try:
+                                batch_concurrency = int(
+                                    os.environ.get("PYWEIXIN_HOOK_MAX_CONCURRENCY", "10")
+                                )
+                            except ValueError:
+                                batch_concurrency = 10
+                            if batch_concurrency < 1:
+                                batch_concurrency = 1
+                            if batch_concurrency > 20:
+                                batch_concurrency = 20
 
-                        batch_result = _hook_dispatcher.post_batch_comments(
-                            all_answers,
-                            author="",
-                            content_hash=result.get("fingerprint", ""),
-                            concurrency=batch_concurrency,
-                        )
-                        posted_any = batch_result.succeeded > 0
-                        print(
-                            f"[debug:stream] batch done: {batch_result.succeeded}/"
-                            f"{batch_result.total} in {batch_result.total_latency_ms}ms"
-                        )
-                        if batch_result.failed > 0 and not result.get('error'):
-                            result['error'] = (
-                                f"hook batch partial failure: "
-                                f"{batch_result.failed}/{batch_result.total}"
+                            batch_result = _hook_dispatcher.post_batch_comments(
+                                all_answers,
+                                author="",
+                                content_hash=result.get("fingerprint", ""),
+                                concurrency=batch_concurrency,
                             )
-                    except Exception as e:
-                        print(f"[debug:stream] hook batch error: {e}")
+                            posted_any = batch_result.succeeded > 0
+                            print(
+                                f"[debug:stream] batch done: {batch_result.succeeded}/"
+                                f"{batch_result.total} in {batch_result.total_latency_ms}ms"
+                            )
+                            if batch_result.failed > 0 and not result.get('error'):
+                                result['error'] = (
+                                    f"hook batch partial failure: "
+                                    f"{batch_result.failed}/{batch_result.total}"
+                                )
+                        except Exception as e:
+                            print(f"[debug:stream] hook batch error: {e}")
             else:
                 # Original streaming path: post each answer immediately.
                 editor_preloaded = False
