@@ -86,16 +86,32 @@ class HookCommentSender:
         return self._bridge
 
     def is_hook_ready(self) -> bool:
-        """Check if the hook is installed and the state is captured."""
+        """Check if the hook is installed and state captured."""
         try:
-            # ping checks if the bridge is alive, status checks the hook state.
             status_resp = self._bridge.status()
             if status_resp.ok:
                 data = status_resp.data
-                ready = bool(data.get("hook_installed")) and bool(
+                return bool(data.get("hook_installed")) and bool(
                     data.get("state_captured")
                 )
-                return ready
+        except Exception:
+            pass
+        return False
+
+    def is_parallel_ready(self) -> bool:
+        """Check if hook parallel context is ready (safe for parallel fast path)."""
+        try:
+            status_resp = self._bridge.status()
+            if status_resp.ok:
+                data = status_resp.data
+                # Keep backward compatibility for older DLLs that don't expose
+                # parallel_ready yet.
+                parallel_ready = bool(data.get("parallel_ready", True))
+                return (
+                    bool(data.get("hook_installed"))
+                    and bool(data.get("state_captured"))
+                    and parallel_ready
+                )
         except Exception:
             pass
         return False
@@ -133,7 +149,8 @@ class HookCommentSender:
 
         # Optimization: if using capture_thread but no capture thread id is found,
         # fail early to avoid the wait_timeout_ms (usually 400ms).
-        if self._execution_mode == "capture_thread":
+        _effective_mode = self._execution_mode
+        if _effective_mode == "capture_thread":
             tid = self.get_capture_thread_id()
             if tid == 0:
                 return CommentResult(
@@ -142,16 +159,39 @@ class HookCommentSender:
                     error_code=HookErrorCode.SNS_ID_NOT_FOUND,
                     error_message="capture_thread_id is 0, state not captured yet",
                 )
+            # If capture context is stale, fall back to pipe_thread (direct call)
+            # instead of waiting for the 400ms capture-thread timeout.
+            try:
+                _st = self._bridge.status()
+                if _st.ok:
+                    _age = _st.data.get("capture_age_ms", 0)
+                    if _age > 10_000:  # >10s since last UI comment
+                        _effective_mode = "pipe_thread"
+                        print(f"[hook] capture stale ({_age}ms), falling back to pipe_thread")
+            except Exception:
+                pass
 
         resp = self._bridge.send_comment(
             content,
             sns_id=effective_sns_id,
             reply_to=reply_to,
             allow_queue_fallback=False,
-            execution_mode=self._execution_mode,
+            execution_mode=_effective_mode,
             wait_timeout_ms=self._wait_timeout_ms,
             prefer_arg1_template=self._prefer_arg1_template,
         )
+        # capture_thread 超时时自动重试 pipe_thread（fresh capture 下大概率成功）
+        if not resp.ok and _effective_mode == "capture_thread":
+            print(f"[hook] capture_thread failed ({resp.error_message}), retrying pipe_thread")
+            resp = self._bridge.send_comment(
+                content,
+                sns_id=effective_sns_id,
+                reply_to=reply_to,
+                allow_queue_fallback=False,
+                execution_mode="pipe_thread",
+                wait_timeout_ms=self._wait_timeout_ms,
+                prefer_arg1_template=self._prefer_arg1_template,
+            )
         return CommentResult(
             success=resp.ok,
             method="hook",
@@ -432,24 +472,58 @@ class UICommentSender:
             from .moments_ext import comment_flow
         except ImportError:  # pragma: no cover
             from moments_ext import comment_flow
+        try:
+            retry_count = int(os.environ.get("PYWEIXIN_UI_SEND_RETRY", "1"))
+        except Exception:
+            retry_count = 1
+        if retry_count < 0:
+            retry_count = 0
+        if retry_count > 3:
+            retry_count = 3
+        try:
+            retry_gap_ms = int(os.environ.get("PYWEIXIN_UI_SEND_RETRY_GAP_MS", "120"))
+        except Exception:
+            retry_gap_ms = 120
+        if retry_gap_ms < 0:
+            retry_gap_ms = 0
+        if retry_gap_ms > 2000:
+            retry_gap_ms = 2000
 
-        ok = comment_flow(
-            self._moments_window,
-            self._content_item,
-            [content],
-            anchor_mode=self._anchor_mode,
-            anchor_source=self._anchor_source,
-            use_offset_fix=False,
-            clear_first=False,
-            pre_move_coords=self._pre_move_coords,
-        )
+        ok = False
+        last_error = "UI comment_flow returned False"
+        total_tries = retry_count + 1
+        for attempt in range(total_tries):
+            try:
+                ok = comment_flow(
+                    self._moments_window,
+                    self._content_item,
+                    [content],
+                    anchor_mode=self._anchor_mode,
+                    anchor_source=self._anchor_source,
+                    use_offset_fix=False,
+                    clear_first=False,
+                    pre_move_coords=self._pre_move_coords,
+                )
+                if ok:
+                    break
+                last_error = "UI comment_flow returned False"
+            except Exception as exc:
+                last_error = f"UI comment_flow exception: {exc}"
+                print(
+                    f"[ui-dispatch] ui send exception attempt "
+                    f"{attempt + 1}/{total_tries}: {exc}"
+                )
+
+            if attempt < total_tries - 1 and retry_gap_ms > 0:
+                time.sleep(retry_gap_ms / 1000.0)
+
         elapsed = int((time.time() - start) * 1000)
         return CommentResult(
             success=bool(ok),
             method="ui",
             latency_ms=elapsed,
             error_code=0 if ok else HookErrorCode.COMMENT_FAILED,
-            error_message="" if ok else "UI comment_flow returned False",
+            error_message="" if ok else last_error,
         )
 
 
@@ -609,6 +683,8 @@ class CommentDispatcher:
         content_hash: str = "",
         reply_to: str = "",
         concurrency: int = 10,
+        batch_mode_override: str | None = None,
+        parallel_send_all: bool = False,
     ) -> BatchCommentResult:
         """Send comments in batch with strict success criteria.
 
@@ -617,6 +693,9 @@ class CommentDispatcher:
             bootstrap comment to drain inside hook callback.
           - ``parallel``: use ``parallel_comment`` then serial fallback.
           - ``serial``: purely serial ``send_comment`` path.
+        ``batch_mode_override`` can force one of the modes above for this call.
+        ``parallel_send_all`` lets parallel mode submit all comments through
+        ``parallel_comment`` instead of sending the first one via serial path.
         """
         if not comments:
             return BatchCommentResult()
@@ -628,15 +707,37 @@ class CommentDispatcher:
         raw_batch_failed = 0
         fallback_count = 0
 
-        batch_mode = os.environ.get("PYWEIXIN_HOOK_BATCH_MODE", "piggyback").strip().lower()
+        raw_batch_mode = (
+            batch_mode_override
+            if batch_mode_override is not None
+            else os.environ.get("PYWEIXIN_HOOK_BATCH_MODE", "piggyback")
+        )
+        raw_batch_mode = str(raw_batch_mode).strip().lower()
+        batch_mode = raw_batch_mode
         if batch_mode not in {"piggyback", "parallel", "serial"}:
+            if batch_mode_override is not None:
+                print(
+                    f"[batch-dispatch] invalid batch_mode_override={batch_mode_override!r}, "
+                    "fallback to piggyback"
+                )
             batch_mode = "piggyback"
 
-        # Auto-upgrade optimization: if batch mode is piggyback but the hook is READY
-        # (state captured), upgrade to parallel mode immediately. Parallel mode
-        # is faster (no UI bootstrap) and is safe once state is captured.
-        if batch_mode == "piggyback" and self._hook_sender is not None:
-            if self._hook_sender.is_hook_ready():
+        # Optional auto-upgrade optimization: if batch mode is piggyback and
+        # hook state is ready, optionally upgrade to parallel mode.
+        # Disabled by default because parallel path may be unstable on some builds.
+        auto_upgrade_parallel = os.environ.get(
+            "PYWEIXIN_HOOK_AUTO_UPGRADE_PARALLEL", "0"
+        ) in {"1", "true", "True", "yes", "on"}
+        if (
+            batch_mode_override is None
+            and
+            auto_upgrade_parallel
+            and
+            batch_mode == "piggyback"
+            and raw_batch_mode == "piggyback"
+            and self._hook_sender is not None
+        ):
+            if self._hook_sender.is_parallel_ready():
                 print("[batch-dispatch] Hook ready (state captured), upgrading piggyback -> parallel")
                 batch_mode = "parallel"
 
@@ -864,8 +965,9 @@ class CommentDispatcher:
                         fallback_count=fallback_count,
                     )
 
-        # Degenerate/small cases use strict serial behavior.
-        if len(comments) == 1 or batch_mode == "serial":
+        # Degenerate/small cases use strict serial behavior, except when caller
+        # explicitly requests parallel for a single item.
+        if batch_mode == "serial" or (len(comments) == 1 and batch_mode != "parallel"):
             for c in comments:
                 results.append(_send_one_serial(c))
             elapsed = int((time.time() - batch_start) * 1000)
@@ -884,6 +986,8 @@ class CommentDispatcher:
             )
 
         remaining = comments[1:]
+        if batch_mode == "parallel" and len(comments) == 1:
+            remaining = comments
         can_use_hook_batch = (
             self._hook_sender is not None
             and not self._breaker.is_open
@@ -954,12 +1058,17 @@ class CommentDispatcher:
         bridge = self._hook_sender.bridge
         batch_resp: BatchCommentResult | None = None
         batch_exc: Exception | None = None
+        batch_items = remaining
 
         if batch_mode == "parallel":
-            results.append(_send_one_serial(comments[0]))
+            if len(comments) > 1 and not parallel_send_all:
+                results.append(_send_one_serial(comments[0]))
+                batch_items = remaining
+            else:
+                batch_items = comments if len(comments) > 1 else remaining
             try:
                 batch_resp = bridge.send_parallel_comments(
-                    remaining,
+                    batch_items,
                     sns_id=effective_sns_id,
                     reply_to=reply_to,
                     max_concurrency=concurrency,
@@ -1019,7 +1128,7 @@ class CommentDispatcher:
             if disable_ui_fallback:
                 elapsed = int((time.time() - batch_start) * 1000)
                 # Keep already executed first result, mark remaining as failed.
-                for _ in remaining:
+                for _ in batch_items:
                     results.append(
                         CommentResult(
                             success=False,
@@ -1041,9 +1150,9 @@ class CommentDispatcher:
                     raw_batch_failed=raw_batch_failed,
                     fallback_count=0,
                 )
-            for c in remaining:
+            for c in batch_items:
                 results.append(_send_one_serial(c))
-            fallback_count += len(remaining)
+            fallback_count += len(batch_items)
         else:
             assert batch_resp is not None
             raw_batch_total = int(batch_resp.total)
@@ -1054,7 +1163,7 @@ class CommentDispatcher:
                 f"{batch_resp.total} in {batch_resp.total_latency_ms}ms"
             )
             # Strict: keep batch successes, fallback only failed items.
-            for idx, comment_text in enumerate(remaining):
+            for idx, comment_text in enumerate(batch_items):
                 if idx < len(batch_resp.results):
                     item_res = batch_resp.results[idx]
                 else:

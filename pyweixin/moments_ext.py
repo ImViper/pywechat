@@ -7,6 +7,7 @@ import re
 import time
 import json
 import hashlib
+import threading
 import pyautogui
 import win32gui
 import win32con
@@ -168,6 +169,26 @@ def _click_send_button(anchor_rect, x_offset: int = 70, y_offset: int = 42) -> b
             return True
     mouse.click(coords=fallback_coords)
     return False
+
+
+def _is_valid_anchor_rect(rect) -> bool:
+    """Validate anchor rectangle before coordinate-based send click."""
+    try:
+        left = int(rect.left)
+        top = int(rect.top)
+        right = int(rect.right)
+        bottom = int(rect.bottom)
+    except Exception:
+        return False
+    w = right - left
+    h = bottom - top
+    if w < 30 or h < 20:
+        return False
+    if right <= 0 or bottom <= 0:
+        return False
+    if left == 0 and top == 0 and right == 0 and bottom == 0:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -399,12 +420,15 @@ def paste_and_send_comment(moments_window, text: str, anchor_mode: str = 'list',
         try:
             cr = anchor_source.rectangle()
             print(f'[debug:paste_send] anchor rect: L={cr.left} T={cr.top} R={cr.right} B={cr.bottom}')
-            if anchor_mode == 'list':
-                _click_send_button(cr, x_offset=_SNS_SEND_LIST_X_OFFSET, y_offset=_SNS_SEND_LIST_Y_OFFSET)
+            if _is_valid_anchor_rect(cr):
+                if anchor_mode == 'list':
+                    _click_send_button(cr, x_offset=_SNS_SEND_LIST_X_OFFSET, y_offset=_SNS_SEND_LIST_Y_OFFSET)
+                else:
+                    _click_send_button(cr, x_offset=_SNS_SEND_DETAIL_X_OFFSET, y_offset=_SNS_SEND_DETAIL_Y_OFFSET)
+                clicked_by_anchor = True
+                print('[debug:paste_send] clicked send by anchor')
             else:
-                _click_send_button(cr, x_offset=_SNS_SEND_DETAIL_X_OFFSET, y_offset=_SNS_SEND_DETAIL_Y_OFFSET)
-            clicked_by_anchor = True
-            print('[debug:paste_send] clicked send by anchor')
+                print('[debug:paste_send] invalid anchor rect, fallback to enter')
         except Exception as e:
             clicked_by_anchor = False
             print(f'[debug:paste_send] anchor click failed: {e}')
@@ -1411,6 +1435,9 @@ def fetch_and_comment_from_moments_feed(
             pyautogui.press('home')
         not_contents = ['mmui::TimelineCommentCell', 'mmui::TimelineCell', 'mmui::TimelineAdGridImageCell']
         selected_item = None
+        selected_parsed = None
+        fallback_parsed = None
+        fallback_fingerprint = ''
         for _ in range(15):
             try:
                 moments_list.type_keys('{DOWN}', pause=0.05)
@@ -1422,41 +1449,66 @@ def fetch_and_comment_from_moments_feed(
                 moments_list = reacquire_feed_list(retries=4, wait=0.1)
                 selected = [li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
             if selected and selected[0].class_name() not in not_contents:
-                selected_item = selected[0]
+                candidate = selected[0]
+                c_author, c_body, c_content, c_image_count, c_publish_time = parse_feed_listitem(candidate)
+                c_hasher = hashlib.sha1()
+                c_hasher.update(c_content.encode('utf-8', errors='ignore'))
+                c_hasher.update(c_publish_time.encode('utf-8', errors='ignore'))
+                c_hasher.update(str(c_image_count).encode('utf-8'))
+                c_fingerprint = c_hasher.hexdigest()
+                if fallback_parsed is None:
+                    fallback_parsed = (
+                        c_author, c_body, c_content, c_image_count, c_publish_time
+                    )
+                    fallback_fingerprint = c_fingerprint
+
+                if target_author:
+                    author_hit = (c_author == target_author) or (target_author in c_author)
+                    if not author_hit:
+                        continue
+                if last_fingerprint and c_fingerprint == last_fingerprint:
+                    continue
+
+                c_text_for_filter = c_body if c_body else c_content
+                if include_keywords and not any(kw in c_text_for_filter for kw in include_keywords):
+                    continue
+                if exclude_keywords and any(kw in c_text_for_filter for kw in exclude_keywords):
+                    continue
+
+                selected_item = candidate
+                selected_parsed = (
+                    c_author, c_body, c_content, c_image_count, c_publish_time, c_fingerprint
+                )
                 break
         if selected_item is None:
+            if fallback_parsed is not None:
+                author, body, content, image_count, publish_time = fallback_parsed
+                result['author'] = author
+                result['content'] = content
+                result['image_count'] = image_count
+                result['publish_time'] = publish_time
+                result['fingerprint'] = fallback_fingerprint
+                result['success'] = True
+                return result
             result['error'] = 'cannot locate first valid feed item'
             return result
 
-        author, body, content, image_count, publish_time = parse_feed_listitem(selected_item)
+        if selected_parsed is None:
+            author, body, content, image_count, publish_time = parse_feed_listitem(selected_item)
+            hasher = hashlib.sha1()
+            hasher.update(content.encode('utf-8', errors='ignore'))
+            hasher.update(publish_time.encode('utf-8', errors='ignore'))
+            hasher.update(str(image_count).encode('utf-8'))
+            fingerprint = hasher.hexdigest()
+        else:
+            author, body, content, image_count, publish_time, fingerprint = selected_parsed
+
         result['author'] = author
         result['content'] = content
         result['image_count'] = image_count
         result['publish_time'] = publish_time
-
-        hasher = hashlib.sha1()
-        hasher.update(content.encode('utf-8', errors='ignore'))
-        hasher.update(publish_time.encode('utf-8', errors='ignore'))
-        hasher.update(str(image_count).encode('utf-8'))
-        result['fingerprint'] = hasher.hexdigest()
-
-        if target_author:
-            author_hit = (author == target_author) or (target_author in author)
-            if not author_hit:
-                result['success'] = True
-                return result
-
-        if last_fingerprint and result['fingerprint'] == last_fingerprint:
-            result['success'] = True
-            return result
-
+        result['fingerprint'] = fingerprint
         text_for_filter = body if body else content
-        if include_keywords and not any(kw in text_for_filter for kw in include_keywords):
-            result['success'] = True
-            return result
-        if exclude_keywords and any(kw in text_for_filter for kw in exclude_keywords):
-            result['success'] = True
-            return result
 
         prefix = target_author.strip() if target_author else 'feed'
         run_folder = os.path.join(target_folder, f'{prefix}_{int(time.time() * 1000)}')
@@ -1472,6 +1524,16 @@ def fetch_and_comment_from_moments_feed(
 
         _hook_dispatcher = None
         _use_hook = False
+        requested_hook_batch_mode_early = os.environ.get(
+            "PYWEIXIN_HOOK_BATCH_MODE", "piggyback"
+        ).strip().lower()
+        if requested_hook_batch_mode_early not in {
+            "piggyback", "parallel", "serial", "fast_first_batch"
+        }:
+            requested_hook_batch_mode_early = "piggyback"
+        fast_first_pre_hook_enabled = os.environ.get(
+            "PYWEIXIN_FAST_FIRST_PRE_HOOK", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         if os.environ.get('PYWEIXIN_HOOK_ENABLED', '0') == '1':
             try:
                 from .comment_dispatcher import CommentDispatcher
@@ -1496,7 +1558,9 @@ def fetch_and_comment_from_moments_feed(
         
         # [Optimization] Instant Text-Match Comment (Zero Latency)
         # Check if the text content matches any known answer or simple math BEFORE starting AI.
-        if _use_hook and _hook_dispatcher:
+        if _use_hook and _hook_dispatcher and (
+            requested_hook_batch_mode_early != "fast_first_batch" or fast_first_pre_hook_enabled
+        ):
             try:
                 from pyweixin.rush_callback_multi import TemplateMatchCommentSource
                 from pyweixin.rush_types import QuestionTemplate
@@ -1557,6 +1621,8 @@ def fetch_and_comment_from_moments_feed(
                          instant_first_answer = instant_answer
                     else:
                          print(f"[debug:stream] Instant Hook failed: {hr.error_message}")
+                         # 答案不丢弃，后续会由 callback 重新产出进入队列
+                         _use_hook = False  # Hook 不可用，后续走 UI
             except Exception as e:
                 print(f"[debug:stream] Instant Text-Match check failed: {e}")
 
@@ -1574,7 +1640,13 @@ def fetch_and_comment_from_moments_feed(
         
         # [Optimization] Pre-Image Hook Attempt (Secondary check if Instant failed/missed)
         # Try to catch instant answers (e.g. OCR templates) and fire Hook comment
-        if not first_comment_done and is_streaming and _hook_dispatcher is not None and _use_hook:
+        if (
+            not first_comment_done
+            and is_streaming
+            and _hook_dispatcher is not None
+            and _use_hook
+            and (requested_hook_batch_mode_early != "fast_first_batch" or fast_first_pre_hook_enabled)
+        ):
             try:
                 # Peek for answer with tiny timeout (50ms)
                 pre_answer = cb_result.get(timeout=0.05)
@@ -1593,10 +1665,44 @@ def fetch_and_comment_from_moments_feed(
                     else:
                         print(f"[debug:stream] pre-image hook failed: {hr.error_message}")
                         cb_result.put(pre_answer)
+                        # Hook 不可用且已有答案 → 跳过图片提取，直接走 UI 评论
+                        _use_hook = False
+                        first_comment_done = False
+                        print("[debug:stream] has answer + no hook → skip image extraction, go UI")
             except _queue_mod.Empty:
                 pass  # No instant answer, proceed to image extraction
 
-        if image_count > 0:
+        # 如果已有答案且 Hook 不可用，跳过图片提取直接 reacquire
+        _skip_image = (not _use_hook) and is_streaming and (not first_comment_done)
+        if _skip_image:
+            try:
+                _peek = cb_result.get(timeout=0.01)
+                cb_result.put(_peek)
+                _skip_image = True
+                print("[debug:img] skipping image extraction (answer already in queue)")
+            except _queue_mod.Empty:
+                _skip_image = False  # 没答案，还是要提取图片给 OCR/AI
+
+        _defer_image_extraction = False
+        force_defer_fast_first = (
+            requested_hook_batch_mode_early == "fast_first_batch"
+            and is_streaming
+            and image_count > 0
+            and (not first_comment_done)
+            and _use_hook
+            and _hook_dispatcher is not None
+            and getattr(_hook_dispatcher, "_hook_sender", None) is not None
+            and os.environ.get("PYWEIXIN_FAST_FIRST_DEFER_IMAGES", "1").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if force_defer_fast_first:
+            _defer_image_extraction = True
+            print("[debug:img] fast_first mode: force defer image extraction until after first comment")
+        elif _skip_image:
+            _defer_image_extraction = True  # 延迟到第一条评论之后再提取图片
+            print("[debug:img] deferring image extraction until after first comment")
+
+        elif image_count > 0:
             try:
                 rect = selected_item.rectangle()
                 win_rect = moments_window.rectangle()
@@ -1714,10 +1820,72 @@ def fetch_and_comment_from_moments_feed(
             all_answers = []
             comment_count = 0
 
+            requested_hook_batch_mode = os.environ.get(
+                "PYWEIXIN_HOOK_BATCH_MODE", "piggyback"
+            ).strip().lower()
+            if requested_hook_batch_mode not in {
+                "piggyback", "parallel", "serial", "fast_first_batch"
+            }:
+                requested_hook_batch_mode = "piggyback"
+
             # Hook 路径（通过 PYWEIXIN_HOOK_ENABLED=1 启用）
-            _hook_dispatcher = None
+            # 复用 pre-image 阶段的 _hook_dispatcher（pipe 是单连接的，不能重建）
             _use_hook = False
-            if os.environ.get('PYWEIXIN_HOOK_ENABLED', '0') == '1':
+            if _hook_dispatcher is not None and _hook_dispatcher._hook_sender is not None:
+                # Rebind UI sender with the reacquired anchor so Hook failure can
+                # gracefully fallback to UI in fast_first_batch path.
+                try:
+                    from .comment_dispatcher import UICommentSender
+                    _ui_anchor = comment_listitem
+                    try:
+                        _ui_rect = _ui_anchor.rectangle() if _ui_anchor is not None else None
+                        if _ui_rect is None or (not _is_valid_anchor_rect(_ui_rect)):
+                            _ui_anchor = None
+                    except Exception:
+                        _ui_anchor = None
+                    _hook_dispatcher._ui_sender = UICommentSender(
+                        moments_window,
+                        selected_item,
+                        anchor_mode="list",
+                        anchor_source=_ui_anchor,
+                        pre_move_coords=center_point,
+                    )
+                except Exception:
+                    pass
+                # 检查 capture 是否 fresh，stale 时不走 Hook（避免进 fast_first_batch 后无 UI fallback）
+                try:
+                    _st = _hook_dispatcher._hook_sender._bridge.status()
+                    _age = _st.data.get("capture_age_ms", 99999) if _st.ok else 99999
+                    _captured = bool(_st.data.get("state_captured", False)) if _st.ok else False
+                    try:
+                        _capture_tid = int(_st.data.get("capture_thread_id", 0)) if _st.ok else 0
+                    except Exception:
+                        _capture_tid = 0
+                    _hook_ready = (_age < 10_000) and _captured and (_capture_tid > 0)
+
+                    if _hook_ready:
+                        _use_hook = True
+                        print(
+                            f"[debug:stream] hook dispatcher reused, "
+                            f"capture fresh ({_age}ms, tid={_capture_tid})"
+                        )
+                    else:
+                        if requested_hook_batch_mode == "fast_first_batch":
+                            _use_hook = True
+                            print(
+                                f"[debug:stream] hook dispatcher reused but not fully ready "
+                                f"(age={_age}ms, captured={_captured}, tid={_capture_tid}), "
+                                "keep hook for fast_first_batch probing (UI fallback + piggyback)"
+                            )
+                        else:
+                            print(
+                                f"[debug:stream] hook dispatcher reused but hook not ready "
+                                f"(age={_age}ms, captured={_captured}, tid={_capture_tid}), using UI"
+                            )
+                except Exception:
+                    print('[debug:stream] hook dispatcher reused but status check failed, using UI')
+            elif os.environ.get('PYWEIXIN_HOOK_ENABLED', '0') == '1':
+                # pre-image 没建过 dispatcher，尝试新建
                 try:
                     from .comment_dispatcher import CommentDispatcher
                     _hook_dispatcher = CommentDispatcher.from_env(
@@ -1732,14 +1900,119 @@ def fetch_and_comment_from_moments_feed(
                         print('[debug:stream] hook enabled but DLL not connected, using UI')
                 except Exception as e:
                     print(f'[debug:stream] hook dispatcher init error: {e}')
+            else:
+                print('[debug:stream] hook not enabled')
 
             # 预开编辑器：在等待 AI/OCR 答案期间先点开评论输入框
-            hook_batch_mode = os.environ.get(
-                "PYWEIXIN_HOOK_BATCH_MODE", "piggyback"
-            ).strip().lower()
+            hook_batch_mode = requested_hook_batch_mode
             use_hook_batch = _use_hook and hook_batch_mode in {
                 "piggyback", "parallel", "serial", "fast_first_batch"
             }
+
+            def _extract_deferred_images_after_first_comment() -> None:
+                nonlocal _defer_image_extraction, comment_listitem
+                if not _defer_image_extraction:
+                    return
+                _defer_image_extraction = False
+
+                if image_count > 0:
+                    try:
+                        print("[debug:img:deferred] extracting images after first comment")
+                        _quick_capture = os.environ.get(
+                            "PYWEIXIN_FAST_FIRST_QUICK_CAPTURE", "0"
+                        ).strip().lower() in {"1", "true", "yes", "on"}
+                        if _quick_capture:
+                            _quick_start = time.time()
+                            _quick_path = os.path.join(run_folder, "0_quick.png")
+                            try:
+                                selected_item.capture_as_image().save(_quick_path)
+                            except Exception:
+                                moments_window.capture_as_image().save(_quick_path)
+                            if os.path.isfile(_quick_path):
+                                _quick_paths = [_quick_path]
+                                _quick_ms = int((time.time() - _quick_start) * 1000)
+                                result['image_paths'] = _quick_paths
+                                print(
+                                    f"[debug:img:deferred] quick captured 1 image "
+                                    f"({_quick_ms}ms)"
+                                )
+                                _deferred_images.set(_quick_paths)
+                                try:
+                                    comment_listitem = resolve_feed_comment_anchor(moments_list, selected_item)
+                                except Exception:
+                                    pass
+                                return
+                        _d_rect = selected_item.rectangle()
+                        _d_win_rect = moments_window.rectangle()
+                        _d_rclick = (_d_win_rect.mid_point().x, _d_win_rect.mid_point().y)
+                        _d_candidates = [
+                            (_d_rect.left + 120, _d_rect.bottom - 90),
+                            (_d_rect.left + 220, _d_rect.bottom - 120),
+                            (_d_rect.mid_point().x, _d_rect.bottom - 100),
+                        ]
+                        _d_paths = []
+                        img_start = time.time()
+                        for _d_pos in _d_candidates:
+                            try:
+                                mouse.click(coords=_d_pos)
+                                time.sleep(0.08)
+                                mouse.right_click(coords=_d_rclick)
+                                copy_menu = moments_window.child_window(**MenuItems.CopyMenuItem)
+                                if copy_menu.exists(timeout=0.15):
+                                    pyautogui.press('esc')
+                                    time.sleep(0.03)
+                                    for _di in range(image_count):
+                                        if _di > 0:
+                                            pyautogui.press('right', interval=0.08)
+                                            time.sleep(0.08)
+                                        _dp = os.path.join(run_folder, f'{_di}.png')
+                                        moments_window.capture_as_image().save(_dp)
+                                        if os.path.isfile(_dp):
+                                            _d_paths.append(_dp)
+                                    break
+                            finally:
+                                pyautogui.press('esc')
+                                time.sleep(0.05)
+                        _d_ms = int((time.time() - img_start) * 1000)
+                        if not _d_paths:
+                            try:
+                                _fb_path = os.path.join(run_folder, "0_fallback.png")
+                                try:
+                                    selected_item.capture_as_image().save(_fb_path)
+                                except Exception:
+                                    moments_window.capture_as_image().save(_fb_path)
+                                if os.path.isfile(_fb_path):
+                                    _d_paths = [_fb_path]
+                                    print("[debug:img:deferred] extraction empty, fallback captured 1 image")
+                            except Exception as _fb_empty_err:
+                                print(f"[debug:img:deferred] empty-result fallback failed: {_fb_empty_err}")
+                        result['image_paths'] = _d_paths
+                        print(f'[debug:img:deferred] extracted {len(_d_paths)}/{image_count} images ({_d_ms}ms)')
+                        _deferred_images.set(_d_paths)
+                    except Exception as _d_err:
+                        print(f'[debug:img:deferred] extraction failed: {_d_err}')
+                        _fallback_paths = []
+                        try:
+                            _fb_path = os.path.join(run_folder, "0_fallback.png")
+                            try:
+                                selected_item.capture_as_image().save(_fb_path)
+                            except Exception:
+                                moments_window.capture_as_image().save(_fb_path)
+                            if os.path.isfile(_fb_path):
+                                _fallback_paths.append(_fb_path)
+                                result['image_paths'] = _fallback_paths
+                                print("[debug:img:deferred] fallback captured 1 image for OCR/AI")
+                        except Exception as _fb_err:
+                            print(f"[debug:img:deferred] fallback capture failed: {_fb_err}")
+                        _deferred_images.set(_fallback_paths)
+                else:
+                    _deferred_images.set([])
+
+                # Re-acquire anchor after image extraction.
+                try:
+                    comment_listitem = resolve_feed_comment_anchor(moments_list, selected_item)
+                except Exception:
+                    pass
 
             # Batch-first path for Hook mode: collect all answers, then send in one batch.
             if use_hook_batch and _hook_dispatcher is not None:
@@ -1752,8 +2025,48 @@ def fetch_and_comment_from_moments_feed(
                     # 4. Batch post remaining in Serial Mode
                     # ============================================================
                     print("[debug:stream] fast_first_batch mode: waiting for first answer")
+
+                    editor_preload_started = False
+
+                    def _preload_comment_editor_for_fallback() -> None:
+                        nonlocal editor_preload_started
+                        if editor_preload_started:
+                            return
+                        if _hook_dispatcher is None or getattr(_hook_dispatcher, "_ui_sender", None) is None:
+                            return
+                        editor_preload_started = True
+
+                        def _run_preload() -> None:
+                            try:
+                                _opened = open_comment_editor(
+                                    moments_window,
+                                    selected_item,
+                                    use_offset_fix=False,
+                                    pre_move_coords=center_point,
+                                )
+                                if _opened:
+                                    print("[debug:stream] editor pre-opened while waiting first answer")
+                                else:
+                                    print("[debug:stream] editor pre-open failed while waiting first answer")
+                            except Exception as _pre_err:
+                                print(f"[debug:stream] editor preload error: {_pre_err}")
+
+                        try:
+                            threading.Thread(target=_run_preload, daemon=True).start()
+                        except Exception as _thread_err:
+                            print(f"[debug:stream] editor preload thread start failed: {_thread_err}")
+
+                    editor_preload_enabled = os.environ.get(
+                        "PYWEIXIN_FAST_FIRST_EDITOR_PRELOAD", "0"
+                    ).strip().lower() in {"1", "true", "yes", "on"}
+                    if editor_preload_enabled:
+                        _preload_comment_editor_for_fallback()
+                    else:
+                        print("[debug:stream] fast_first editor preload disabled")
                     
                     first_answer = None
+                    pending_first_answer = None
+                    early_scatter_sent: set[str] = set()
                     if first_comment_done:
                         print("[debug:stream] first answer already sent pre-image, skipping wait")
                         first_answer = instant_first_answer
@@ -1778,30 +2091,524 @@ def fetch_and_comment_from_moments_feed(
                             first_answer = str(first_answer).strip()
                             if first_answer:
                                 try:
-                                    first_result = _hook_dispatcher.post_comment(
-                                        first_answer,
-                                        author=result.get("author", ""),
-                                        content_hash=result.get("fingerprint", "")[:16],
+                                    # Fast-first baseline: send first comment via UI directly
+                                    # to avoid hook probing noise/race on unstable capture state.
+                                    first_ui_ok = comment_flow(
+                                        moments_window,
+                                        selected_item,
+                                        [first_answer],
+                                        anchor_mode="list",
+                                        anchor_source=comment_listitem,
+                                        use_offset_fix=False,
+                                        clear_first=False,
+                                        pre_move_coords=center_point,
                                     )
-                                    posted_any = first_result.success
-                                    comment_count = 1
-                                    all_answers.append(first_answer)
+                                    posted_any = bool(first_ui_ok)
+                                    comment_count = 1 if posted_any else 0
 
-                                    if first_result.success:
-                                        print(f"[debug:stream] first comment posted via {first_result.method}: {first_answer}")
+                                    if first_ui_ok:
+                                        all_answers.append(first_answer)
+                                        print(f"[debug:stream] first comment posted via ui: {first_answer}")
                                     else:
-                                        print(f"[debug:stream] first comment failed: {first_result.error_message}")
+                                        print("[debug:stream] first comment UI failed, trying hook fallback once")
+                                        first_result = _hook_dispatcher.post_comment(
+                                            first_answer,
+                                            author=result.get("author", ""),
+                                            content_hash=result.get("fingerprint", "")[:16],
+                                        )
+                                        posted_any = first_result.success
+                                        comment_count = 1 if first_result.success else 0
+                                        if first_result.success:
+                                            all_answers.append(first_answer)
+                                            print(
+                                                f"[debug:stream] first comment recovered via "
+                                                f"{first_result.method}: {first_answer}"
+                                            )
+                                        else:
+                                            pending_first_answer = first_answer
+                                            print(
+                                                f"[debug:stream] first comment still failed "
+                                                f"({first_result.error_message}), "
+                                                "will include it in batch fallback"
+                                            )
 
                                 except Exception as exc:
                                     print(f"[debug:stream] first comment exception: {exc}")
+                                    pending_first_answer = first_answer
 
-                    # Collect remaining answers (non-blocking with timeout)
+                    def _build_scatter_candidates(answer_text: str) -> list[str]:
+                        if not answer_text:
+                            return []
+                        m = re.match(r"^\s*(\d+)\s*(.+?)\s*$", str(answer_text))
+                        if not m:
+                            return []
+                        base_num = int(m.group(1))
+                        keyword = m.group(2).strip()
+                        if not keyword:
+                            return []
+
+                        raw_vals = os.environ.get(
+                            "PYWEIXIN_FAST_FIRST_SCATTER_VALUES", "1,2,3"
+                        )
+                        nums: list[int] = []
+                        seen_num: set[int] = set()
+                        for tok in raw_vals.replace("，", ",").split(","):
+                            tok = tok.strip()
+                            if not tok:
+                                continue
+                            try:
+                                n = int(tok)
+                            except Exception:
+                                continue
+                            if n <= 0 or n in seen_num:
+                                continue
+                            seen_num.add(n)
+                            nums.append(n)
+
+                        if not nums:
+                            return []
+
+                        candidates: list[str] = []
+                        seen_ans: set[str] = set()
+                        for n in nums:
+                            if n == base_num:
+                                continue
+                            ans = f"{n}{keyword}".strip()
+                            if not ans or ans == answer_text or ans in seen_ans:
+                                continue
+                            seen_ans.add(ans)
+                            candidates.append(ans)
+                        return candidates
+
+                    def _post_early_hook_scatter(answer_text: str) -> None:
+                        nonlocal posted_any, comment_count
+                        enabled = os.environ.get(
+                            "PYWEIXIN_FAST_FIRST_SCATTER", "0"
+                        ).strip().lower() in {"1", "true", "yes", "on"}
+                        if not enabled:
+                            return
+                        if not answer_text:
+                            return
+                        if _hook_dispatcher is None or getattr(_hook_dispatcher, "_hook_sender", None) is None:
+                            print("[debug:stream] early scatter skipped: hook sender unavailable")
+                            return
+
+                        candidates = _build_scatter_candidates(answer_text)
+                        if not candidates:
+                            print("[debug:stream] early scatter skipped: no candidates")
+                            return
+
+                        try:
+                            scatter_max = int(
+                                os.environ.get("PYWEIXIN_FAST_FIRST_SCATTER_MAX", "3")
+                            )
+                        except Exception:
+                            scatter_max = 3
+                        if scatter_max < 1:
+                            scatter_max = 1
+                        candidates = candidates[:scatter_max]
+
+                        try:
+                            scatter_age_limit_ms = int(
+                                os.environ.get("PYWEIXIN_FAST_FIRST_SCATTER_CAPTURE_MAX_AGE_MS", "3000")
+                            )
+                        except Exception:
+                            scatter_age_limit_ms = 3000
+                        if scatter_age_limit_ms < 200:
+                            scatter_age_limit_ms = 200
+
+                        scatter_strategy = os.environ.get(
+                            "PYWEIXIN_FAST_FIRST_SCATTER_STRATEGY", "dispatcher_serial"
+                        ).strip().lower()
+                        if scatter_strategy not in {"dispatcher_serial", "direct_capture"}:
+                            scatter_strategy = "dispatcher_serial"
+                        stop_on_fail = os.environ.get(
+                            "PYWEIXIN_FAST_FIRST_SCATTER_STOP_ON_FAIL", "1"
+                        ).strip().lower() in {"1", "true", "yes", "on"}
+
+                        if scatter_strategy == "dispatcher_serial":
+                            try:
+                                scatter_gap_ms = int(
+                                    os.environ.get("PYWEIXIN_FAST_FIRST_SCATTER_GAP_MS", "90")
+                                )
+                            except Exception:
+                                scatter_gap_ms = 90
+                            if scatter_gap_ms < 0:
+                                scatter_gap_ms = 0
+                            if scatter_gap_ms > 1200:
+                                scatter_gap_ms = 1200
+                            print(
+                                f"[debug:stream] early hook scatter candidates: {candidates} "
+                                f"(strategy=dispatcher_serial, gap={scatter_gap_ms}ms)"
+                            )
+                            try:
+                                scatter_hook_wait_ms = int(
+                                    os.environ.get("PYWEIXIN_FAST_FIRST_SCATTER_HOOK_WAIT_MS", "650")
+                                )
+                            except Exception:
+                                scatter_hook_wait_ms = 650
+                            if scatter_hook_wait_ms < 200:
+                                scatter_hook_wait_ms = 200
+                            if scatter_hook_wait_ms > 5000:
+                                scatter_hook_wait_ms = 5000
+                            hook_wait_old = None
+                            hook_sender_local = getattr(_hook_dispatcher, "_hook_sender", None)
+                            if hook_sender_local is not None:
+                                try:
+                                    hook_wait_old = int(getattr(hook_sender_local, "_wait_timeout_ms", 400))
+                                except Exception:
+                                    hook_wait_old = None
+                                try:
+                                    hook_sender_local._wait_timeout_ms = scatter_hook_wait_ms
+                                except Exception:
+                                    pass
+                            fail_count = 0
+                            scatter_use_ui_fallback = os.environ.get(
+                                "PYWEIXIN_FAST_FIRST_SCATTER_UI_FALLBACK", "0"
+                            ).strip().lower() in {"1", "true", "yes", "on"}
+                            scatter_sns_id = ""
+                            if hook_sender_local is not None:
+                                try:
+                                    _latest = hook_sender_local.bridge.get_latest_sns_id()
+                                    if _latest.ok:
+                                        scatter_sns_id = str(_latest.data.get("sns_id", "") or "")
+                                except Exception:
+                                    scatter_sns_id = ""
+                            try:
+                                for scatter_ans in candidates:
+                                    try:
+                                        if (not scatter_use_ui_fallback) and hook_sender_local is not None:
+                                            scatter_res = hook_sender_local.send_comment(
+                                                scatter_ans,
+                                                sns_id=scatter_sns_id,
+                                                author=result.get("author", ""),
+                                                content_hash=result.get("fingerprint", "")[:16],
+                                            )
+                                        else:
+                                            scatter_res = _hook_dispatcher.post_comment(
+                                                scatter_ans,
+                                                author=result.get("author", ""),
+                                                content_hash=result.get("fingerprint", "")[:16],
+                                            )
+                                    except Exception as _send_err:
+                                        scatter_res = None
+                                        fail_count += 1
+                                        print(f"[debug:stream] early scatter exception: {scatter_ans} -> {_send_err}")
+                                        if stop_on_fail and fail_count >= 1:
+                                            break
+                                        if scatter_gap_ms > 0:
+                                            time.sleep(scatter_gap_ms / 1000.0)
+                                        continue
+
+                                    if scatter_res is not None and scatter_res.success:
+                                        if scatter_ans not in early_scatter_sent:
+                                            early_scatter_sent.add(scatter_ans)
+                                            all_answers.append(scatter_ans)
+                                            posted_any = True
+                                            comment_count += 1
+                                            print(
+                                                f"[debug:stream] early scatter posted via "
+                                                f"{scatter_res.method}: {scatter_ans}"
+                                            )
+                                    else:
+                                        fail_count += 1
+                                        _err = scatter_res.error_message if scatter_res is not None else "unknown"
+                                        print(f"[debug:stream] early scatter failed: {scatter_ans} ({_err})")
+                                        if stop_on_fail and fail_count >= 1:
+                                            break
+                                    if scatter_gap_ms > 0:
+                                        time.sleep(scatter_gap_ms / 1000.0)
+                            finally:
+                                if hook_sender_local is not None and hook_wait_old is not None:
+                                    try:
+                                        hook_sender_local._wait_timeout_ms = hook_wait_old
+                                    except Exception:
+                                        pass
+                            return
+
+                        hook_sender = _hook_dispatcher._hook_sender
+                        bridge = hook_sender.bridge
+                        try:
+                            settle_ms = int(
+                                os.environ.get("PYWEIXIN_FAST_FIRST_SCATTER_SETTLE_MS", "140")
+                            )
+                        except Exception:
+                            settle_ms = 140
+                        if settle_ms > 0:
+                            time.sleep(min(settle_ms, 1200) / 1000.0)
+                        try:
+                            _st = bridge.status()
+                            _age = int(_st.data.get("capture_age_ms", 999999)) if _st.ok else 999999
+                            _captured = bool(_st.data.get("state_captured", False)) if _st.ok else False
+                            _tid = int(_st.data.get("capture_thread_id", 0)) if _st.ok else 0
+                            _arg1_ready = bool(_st.data.get("arg1_template_ready", False)) if _st.ok else False
+                            if (not _captured) or (_tid <= 0) or (_age > scatter_age_limit_ms) or (not _arg1_ready):
+                                print(
+                                    "[debug:stream] early scatter skipped: capture not fresh "
+                                    f"(age={_age}ms, captured={_captured}, tid={_tid}, arg1_ready={_arg1_ready})"
+                                )
+                                return
+                        except Exception as _st_err:
+                            print(f"[debug:stream] early scatter status check failed: {_st_err}")
+                            return
+
+                        scatter_sns_id = ""
+                        try:
+                            _sns = bridge.get_latest_sns_id()
+                            if _sns.ok:
+                                scatter_sns_id = str(_sns.data.get("sns_id", "") or "")
+                        except Exception:
+                            scatter_sns_id = ""
+                        if not scatter_sns_id:
+                            print("[debug:stream] early scatter skipped: sns_id unavailable")
+                            return
+
+                        scatter_mode = os.environ.get(
+                            "PYWEIXIN_FAST_FIRST_SCATTER_MODE", "capture_thread"
+                        ).strip().lower()
+                        if scatter_mode not in {"capture_thread", "pipe_thread"}:
+                            scatter_mode = "capture_thread"
+                        try:
+                            scatter_wait_ms = int(
+                                os.environ.get("PYWEIXIN_FAST_FIRST_SCATTER_WAIT_MS", "650")
+                            )
+                        except Exception:
+                            scatter_wait_ms = 650
+                        if scatter_wait_ms < 200:
+                            scatter_wait_ms = 200
+                        if scatter_wait_ms > 5000:
+                            scatter_wait_ms = 5000
+
+                        print(
+                            f"[debug:stream] early hook scatter candidates: {candidates} "
+                            f"(mode={scatter_mode}, wait={scatter_wait_ms}ms)"
+                        )
+                        fail_count = 0
+                        for scatter_ans in candidates:
+                            try:
+                                # Scatter path intentionally avoids capture->pipe auto-retry to
+                                # prevent SEH regressions from direct call fallback.
+                                scatter_resp = bridge.send_comment(
+                                    scatter_ans,
+                                    sns_id=scatter_sns_id,
+                                    reply_to="",
+                                    allow_queue_fallback=False,
+                                    execution_mode=scatter_mode,
+                                    wait_timeout_ms=scatter_wait_ms,
+                                    prefer_arg1_template=True,
+                                )
+                            except Exception as _send_err:
+                                scatter_resp = None
+                                fail_count += 1
+                                print(f"[debug:stream] early scatter exception: {scatter_ans} -> {_send_err}")
+                                if stop_on_fail and fail_count >= 1:
+                                    break
+                                continue
+
+                            if scatter_resp is not None and scatter_resp.ok:
+                                if scatter_ans not in early_scatter_sent:
+                                    early_scatter_sent.add(scatter_ans)
+                                    all_answers.append(scatter_ans)
+                                    posted_any = True
+                                    comment_count += 1
+                                    print(
+                                        f"[debug:stream] early scatter posted via "
+                                        f"{scatter_mode}: {scatter_ans}"
+                                    )
+                            else:
+                                fail_count += 1
+                                _err = scatter_resp.error_message if scatter_resp is not None else "unknown"
+                                print(f"[debug:stream] early scatter failed: {scatter_ans} ({_err})")
+                                if stop_on_fail and fail_count >= 1:
+                                    break
+
+                    # In fast_first_batch path, we still must release deferred images
+                    # after first comment so OCR/AI can continue producing answers.
+                    if comment_count >= 1 or bool(first_answer):
+                        _extract_deferred_images_after_first_comment()
+                    if comment_count >= 1 and first_answer:
+                        _post_early_hook_scatter(str(first_answer).strip())
+
+                    # Collect remaining answers with optional incremental flush.
                     remaining = []
                     collect_start = time.time()
-                    max_collect_time = 8.0  # 最多再收集 8 秒
+                    try:
+                        max_collect_time = float(
+                            os.environ.get("PYWEIXIN_FAST_FIRST_COLLECT_TIMEOUT_S", "12")
+                        )
+                    except Exception:
+                        max_collect_time = 12.0
+                    if max_collect_time < 2.0:
+                        max_collect_time = 2.0
+                    if max_collect_time > 60.0:
+                        max_collect_time = 60.0
+
+                    try:
+                        batch_concurrency = int(
+                            os.environ.get("PYWEIXIN_HOOK_MAX_CONCURRENCY", "1")
+                        )
+                    except Exception:
+                        batch_concurrency = 1
+                    if batch_concurrency < 1:
+                        batch_concurrency = 1
+
+                    try_parallel_remaining = os.environ.get(
+                        "PYWEIXIN_FAST_FIRST_TRY_PARALLEL_REMAINING", "1"
+                    ) in {"1", "true", "True", "yes", "on"}
+                    prefer_parallel_remaining = os.environ.get(
+                        "PYWEIXIN_FAST_FIRST_PREFER_PARALLEL_REMAINING", "0"
+                    ) in {"1", "true", "True", "yes", "on"}
+                    try:
+                        parallel_min_remaining = int(
+                            os.environ.get("PYWEIXIN_FAST_FIRST_PARALLEL_MIN_REMAINING", "3")
+                        )
+                    except Exception:
+                        parallel_min_remaining = 3
+                    if parallel_min_remaining < 1:
+                        parallel_min_remaining = 1
+                    parallel_ready = False
+                    if try_parallel_remaining:
+                        try:
+                            if (
+                                _hook_dispatcher is not None
+                                and _hook_dispatcher._hook_sender is not None
+                            ):
+                                parallel_ready = _hook_dispatcher._hook_sender.is_parallel_ready()
+                        except Exception:
+                            parallel_ready = False
+
+                    def _resolve_remaining_batch_mode(batch_size: int) -> tuple[str, bool]:
+                        use_parallel = (
+                            parallel_ready
+                            and prefer_parallel_remaining
+                            and batch_size >= parallel_min_remaining
+                        )
+                        return ("parallel", True) if use_parallel else ("piggyback", False)
+
+                    if parallel_ready and prefer_parallel_remaining:
+                        print(
+                            "[debug:stream] fast_first_batch: remaining comments use parallel when "
+                            f"batch>={parallel_min_remaining}"
+                        )
+                    elif parallel_ready and not prefer_parallel_remaining:
+                        print(
+                            "[debug:stream] fast_first_batch: remaining comments -> piggyback "
+                            "(parallel ready but disabled by policy)"
+                        )
+                    elif not parallel_ready and try_parallel_remaining:
+                        print(
+                            "[debug:stream] fast_first_batch: remaining comments -> piggyback "
+                            "(parallel not ready)"
+                        )
+                    else:
+                        print(
+                            "[debug:stream] fast_first_batch: remaining comments -> piggyback "
+                            "(parallel disabled)"
+                        )
+
+                    flush_early = os.environ.get(
+                        "PYWEIXIN_FAST_FIRST_FLUSH_EARLY", "0"
+                    ).strip().lower() in {"1", "true", "yes", "on"}
+                    try:
+                        flush_min_ready = int(
+                            os.environ.get("PYWEIXIN_FAST_FIRST_FLUSH_MIN_READY", "1")
+                        )
+                    except Exception:
+                        flush_min_ready = 1
+                    if flush_min_ready < 1:
+                        flush_min_ready = 1
+
+                    def _refresh_ui_sender_anchor_before_batch() -> None:
+                        nonlocal selected_item, comment_listitem, moments_list, center_point
+                        try:
+                            # Force refresh before remaining batch posting:
+                            # focused listitem/anchor may become stale after first comment + waits.
+                            try:
+                                _fresh_list = reacquire_feed_list(retries=4, wait=0.08)
+                                if _fresh_list is not None:
+                                    moments_list = _fresh_list
+                                    _focused = [
+                                        li
+                                        for li in moments_list.children(control_type='ListItem')
+                                        if li.has_keyboard_focus()
+                                    ]
+                                    if _focused and _focused[0].class_name() not in not_contents:
+                                        selected_item = _focused[0]
+                                    if selected_item is not None:
+                                        try:
+                                            comment_listitem = resolve_feed_comment_anchor(
+                                                moments_list, selected_item
+                                            )
+                                        except Exception:
+                                            comment_listitem = None
+                                        try:
+                                            center_point = compute_feed_item_center_point(selected_item)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+
+                            if _hook_dispatcher is not None and getattr(_hook_dispatcher, "_ui_sender", None) is not None:
+                                _hook_dispatcher._ui_sender._content_item = selected_item
+                                _hook_dispatcher._ui_sender._pre_move_coords = center_point
+                                try:
+                                    _cr = comment_listitem.rectangle() if comment_listitem is not None else None
+                                    if _cr is not None and _is_valid_anchor_rect(_cr):
+                                        _hook_dispatcher._ui_sender._anchor_source = comment_listitem
+                                    else:
+                                        _hook_dispatcher._ui_sender._anchor_source = None
+                                except Exception:
+                                    _hook_dispatcher._ui_sender._anchor_source = None
+                        except Exception:
+                            pass
+
+                    def _post_remaining_batch(batch_answers: list[str], reason: str) -> int:
+                        nonlocal posted_any, comment_count
+                        if not batch_answers:
+                            return 0
+                        try:
+                            batch_mode_override, parallel_send_all = _resolve_remaining_batch_mode(
+                                len(batch_answers)
+                            )
+                            _refresh_ui_sender_anchor_before_batch()
+                            batch_result = _hook_dispatcher.post_batch_comments(
+                                batch_answers,
+                                author=result.get("author", ""),
+                                content_hash=result.get("fingerprint", "")[:16],
+                                concurrency=batch_concurrency,
+                                batch_mode_override=batch_mode_override,
+                                parallel_send_all=parallel_send_all,
+                            )
+                            posted_batch_answers: list[str] = []
+                            for _idx, _ans in enumerate(batch_answers):
+                                if _idx < len(batch_result.results) and batch_result.results[_idx].success:
+                                    posted_batch_answers.append(_ans)
+                            all_answers.extend(posted_batch_answers)
+                            posted_any = posted_any or (batch_result.succeeded > 0)
+                            comment_count += batch_result.succeeded
+                            print(
+                                f"[debug:stream] {reason} posted: "
+                                f"{batch_result.succeeded}/{batch_result.total} "
+                                f"(accepted={posted_batch_answers})"
+                            )
+                            return int(batch_result.succeeded)
+                        except Exception as exc:
+                            print(f"[debug:stream] {reason} exception: {exc}")
+                            return 0
+
+                    if pending_first_answer and pending_first_answer not in remaining:
+                        remaining.append(pending_first_answer)
+                        print(
+                            f"[debug:stream] prepended pending first answer: "
+                            f"{pending_first_answer}"
+                        )
 
                     print("[debug:stream] collecting remaining answers...")
-                    while len(remaining) < 10:  # 最多 10 条后续评论
+                    post_first_remaining_early = os.environ.get(
+                        "PYWEIXIN_FAST_FIRST_POST_FIRST_REMAINING_EARLY", "0"
+                    ).strip().lower() in {"1", "true", "yes", "on"}
+                    post_first_remaining_done = False
+                    while len(remaining) < 10:
                         timeout = max(0.1, max_collect_time - (time.time() - collect_start))
                         if timeout <= 0:
                             print("[debug:stream] collect timeout reached")
@@ -1814,39 +2621,30 @@ def fetch_and_comment_from_moments_feed(
                                 break
 
                             answer = str(answer).strip()
-                            if answer and answer != first_answer:  # 排除与第 1 条重复的
+                            if answer and answer in early_scatter_sent:
+                                print(f"[debug:stream] skip already-scattered answer: {answer}")
+                                continue
+                            if answer and not (comment_count >= 1 and answer == first_answer):
                                 remaining.append(answer)
                                 print(f"[debug:stream] queued: {answer}")
+                                if post_first_remaining_early and (not post_first_remaining_done) and remaining:
+                                    _early_answer = remaining[0]
+                                    _succ = _post_remaining_batch([_early_answer], "early one-shot")
+                                    if _succ > 0:
+                                        remaining = remaining[1:]
+                                    post_first_remaining_done = True
+                                if flush_early and len(remaining) >= flush_min_ready:
+                                    _post_remaining_batch(remaining[:], "incremental batch")
+                                    remaining.clear()
 
                         except _queue_mod.Empty:
                             print("[debug:stream] no more answers in queue")
                             break
 
-                    # Batch post remaining comments
                     if remaining:
-                        print(f"[debug:stream] batch posting {len(remaining)} remaining comments")
-                        try:
-                            batch_concurrency = int(
-                                os.environ.get("PYWEIXIN_HOOK_MAX_CONCURRENCY", "1")  # Serial=1
-                            )
-                            if batch_concurrency < 1:
-                                batch_concurrency = 1
-
-                            batch_result = _hook_dispatcher.post_batch_comments(
-                                remaining,
-                                author=result.get("author", ""),
-                                content_hash=result.get("fingerprint", "")[:16],
-                                concurrency=batch_concurrency,
-                            )
-                            all_answers.extend(remaining)
-                            posted_any = posted_any or (batch_result.succeeded > 0)
-                            comment_count += batch_result.succeeded
-
-                            print(f"[debug:stream] batch posted: {batch_result.succeeded}/{batch_result.total}")
-
-                        except Exception as exc:
-                            print(f"[debug:stream] batch post exception: {exc}")
-
+                        print(f"[debug:stream] final batch posting {len(remaining)} remaining comments")
+                        _post_remaining_batch(remaining[:], "final batch")
+                        remaining.clear()
                 elif hook_batch_mode in {"piggyback", "parallel", "serial"}:
                     # Original batch mode logic
                     print(f"[debug:stream] hook batch mode={hook_batch_mode}, collecting answers")
@@ -1959,8 +2757,28 @@ def fetch_and_comment_from_moments_feed(
                     if posted:
                         posted_any = True
                         print(f"[debug:stream] comment #{comment_count} posted OK")
+                        # UI 评论会触发 hook callback 刷新 capture，重新检查 Hook
+                        if not _use_hook and _hook_dispatcher is not None:
+                            try:
+                                time.sleep(0.1)  # 等 hook callback 完成
+                                if _hook_dispatcher._hook_sender and _hook_dispatcher._hook_sender.is_hook_ready():
+                                    _st = _hook_dispatcher._hook_sender._bridge.status()
+                                    _age = _st.data.get("capture_age_ms", 0) if _st.ok else 99999
+                                    if _age < 5_000:
+                                        _use_hook = True
+                                        print(f"[debug:stream] hook re-enabled after UI comment (capture_age={_age}ms)")
+                            except Exception:
+                                pass
                     else:
                         print(f"[debug:stream] comment #{comment_count} post FAILED")
+
+                    if comment_count == 1:
+                        _extract_deferred_images_after_first_comment()
+
+            # 安全兜底：如果延迟提取标记仍为 True（循环未触发提取），释放 OCR/AI
+            if _defer_image_extraction:
+                print("[debug:img:deferred] fallback: loop ended without extraction, releasing OCR/AI")
+                _deferred_images.set([])
 
             total_ms = int((time.time() - parallel_start) * 1000)
             print(f'[debug:main] streaming done: {comment_count} comments, {total_ms}ms total')
@@ -2054,3 +2872,4 @@ def comment_friend_moment(friend: str, comment_text: str, is_maximize: bool = No
         close_weixin=close_weixin,
     )
     return bool(result and result.get('comment_posted'))
+

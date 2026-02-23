@@ -28,6 +28,8 @@ def try_ocr_count(
     # Extract target keyword from quoted text or brackets in question
     # Matches: \u201c keyword \u201d, "keyword", [keyword]
     target = None
+    # Normalize escaped quotes from Windows UI Automation (\" → ")
+    content = content.replace('\\"', '"').replace("\\'", "'")
     patterns = [
         '[\u201c\u201d](.+?)[\u201c\u201d]',     # Chinese double quotes \u201c\u201d
         '[\u2018\u2019](.+?)[\u2018\u2019]',     # Chinese single quotes \u2018\u2019
@@ -93,6 +95,17 @@ def try_ocr_count(
 
     elapsed = int((time.time() - start_time) * 1000)
     if total_count > 0:
+        try:
+            max_count = int(os.environ.get("PYWEIXIN_OCR_COUNT_MAX", "20"))
+        except Exception:
+            max_count = 20
+        if max_count > 0 and total_count > max_count:
+            if verbose:
+                print(
+                    f"[OCR] suspicious high count={total_count} (> {max_count}), "
+                    "drop OCR answer and fallback to AI"
+                )
+            return None
         answer = f"{total_count}{target}"
         if verbose:
             print(f"[OCR] answer={answer} ({elapsed}ms)")

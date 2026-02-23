@@ -414,6 +414,49 @@ class ArkChatProvider:
         if not self.api_key:
             self.api_key = os.getenv("ARK_API_KEY")
         self.base_url = self.base_url.rstrip("/")
+        # Optional env overrides for speed/stability tuning without code changes.
+        try:
+            env_model = os.getenv("PYWEIXIN_ARK_MODEL", "").strip()
+            if env_model:
+                self.model = env_model
+        except Exception:
+            pass
+        try:
+            env_max_tokens = int(os.getenv("PYWEIXIN_ARK_MAX_TOKENS", str(self.max_tokens)))
+            if env_max_tokens < 8:
+                env_max_tokens = 8
+            if env_max_tokens > 128:
+                env_max_tokens = 128
+            self.max_tokens = env_max_tokens
+        except Exception:
+            pass
+        try:
+            env_temp = float(os.getenv("PYWEIXIN_ARK_TEMPERATURE", str(self.temperature)))
+            if env_temp < 0.0:
+                env_temp = 0.0
+            if env_temp > 1.5:
+                env_temp = 1.5
+            self.temperature = env_temp
+        except Exception:
+            pass
+        try:
+            env_top_p = float(os.getenv("PYWEIXIN_ARK_TOP_P", str(self.top_p)))
+            if env_top_p < 0.1:
+                env_top_p = 0.1
+            if env_top_p > 1.0:
+                env_top_p = 1.0
+            self.top_p = env_top_p
+        except Exception:
+            pass
+        try:
+            env_timeout = float(os.getenv("PYWEIXIN_ARK_TIMEOUT_SEC", str(self.timeout_sec)))
+            if env_timeout < 2.0:
+                env_timeout = 2.0
+            if env_timeout > 20.0:
+                env_timeout = 20.0
+            self.timeout_sec = env_timeout
+        except Exception:
+            pass
 
     @staticmethod
     def _image_to_data_url(image_path: str) -> str:
