@@ -52,6 +52,7 @@ from pyweixin.rush_callback_multi import (
 )
 from pyweixin.rush_engine import load_rush_config
 from pyweixin.moments_ext import fetch_and_comment_from_moments_feed
+from pyweixin.runtime_env import apply_runtime_env, load_and_apply_runtime_env
 from pyweixin.WeChatTools import Navigator
 
 
@@ -109,6 +110,22 @@ def main() -> None:
         "--no-guess", action="store_true",
         help="Disable number scatter shot guessing"
     )
+    parser.add_argument(
+        "--runtime-config", type=str,
+        default=str(PROJECT_ROOT / "config" / "rush_runtime_env.json"),
+        help="Path to runtime env json config"
+    )
+    parser.add_argument(
+        "--runtime-profile", type=str, default="listener",
+        help="Runtime profile name from runtime env json"
+    )
+    parser.add_argument(
+        "--first-answer-mode",
+        type=str,
+        default=None,
+        choices=["auto", "ai_ocr_only"],
+        help="First answer source policy: auto (legacy) or ai_ocr_only"
+    )
 
     args = parser.parse_args()
 
@@ -117,6 +134,34 @@ def main() -> None:
     poll_interval = max(0.2, args.poll_interval)
     answer_suffix = args.suffix
     max_comments = args.max_comments
+    # Runtime tuning from config file (preferred) with minimal fallback defaults.
+    fallback_defaults = {
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
+        "PYWEIXIN_HOOK_ENABLED": "1",
+        "PYWEIXIN_HOOK_BATCH_MODE": "fast_first_batch",
+        "PYWEIXIN_HOOK_MAX_CONCURRENCY": "1",
+    }
+    apply_runtime_env(fallback_defaults, only_if_missing=True)
+    runtime_path, runtime_profile, runtime_applied = load_and_apply_runtime_env(
+        config_path=args.runtime_config,
+        profile=args.runtime_profile,
+        only_if_missing=True,
+    )
+    if runtime_applied:
+        print(
+            f"Runtime env loaded: profile={runtime_profile or 'default'} "
+            f"path={runtime_path} keys={len(runtime_applied)}"
+        )
+    else:
+        print(f"Runtime env config not loaded from {runtime_path}, using fallback defaults")
+
+    first_answer_mode = (
+        args.first_answer_mode
+        or os.getenv("PYWEIXIN_FIRST_ANSWER_MODE", "auto")
+        or "auto"
+    ).strip().lower()
 
     # Parse publish time
     try:
@@ -193,60 +238,63 @@ def main() -> None:
         "耶律洪", "萧寻", "红袖", "胡不医", "顾知意", "赵岚",
     ]
 
-    # Load rush_event.json templates (for TemplateMatch non-COUNT matching)
+    # Load rush_event / known_answers only when legacy TemplateMatch is allowed.
     rush_templates = []
-    rush_config_path = args.rush_config or str(PROJECT_ROOT / "config" / "rush_event.json")
-    if os.path.isfile(rush_config_path):
-        try:
-            rush_cfg = load_rush_config(rush_config_path)
-            rush_templates = rush_cfg.templates
-            print(f"Loaded {len(rush_templates)} templates from {rush_config_path}")
-        except Exception as exc:
-            print(f"Warning: failed to load rush config: {exc}")
-
-    # Load known answers for instant first comment
     known_answers: dict[str, str] = {}
-    known_answers_path = args.known_answers
-    if not known_answers_path:
-        # Auto-detect config/known_answers.json
-        default_ka = PROJECT_ROOT / "config" / "known_answers.json"
-        if default_ka.exists():
-            known_answers_path = str(default_ka)
-    if known_answers_path:
-        known_answers = TemplateMatchCommentSource.load_known_answers(known_answers_path)
-        if known_answers:
-            print(f"Loaded {len(known_answers)} known answers from {known_answers_path}")
+    if first_answer_mode == "auto":
+        rush_config_path = args.rush_config or str(PROJECT_ROOT / "config" / "rush_event.json")
+        if os.path.isfile(rush_config_path):
+            try:
+                rush_cfg = load_rush_config(rush_config_path)
+                rush_templates = rush_cfg.templates
+                print(f"Loaded {len(rush_templates)} templates from {rush_config_path}")
+            except Exception as exc:
+                print(f"Warning: failed to load rush config: {exc}")
+
+        known_answers_path = args.known_answers
+        if not known_answers_path:
+            # Auto-detect config/known_answers.json
+            default_ka = PROJECT_ROOT / "config" / "known_answers.json"
+            if default_ka.exists():
+                known_answers_path = str(default_ka)
+        if known_answers_path:
+            known_answers = TemplateMatchCommentSource.load_known_answers(known_answers_path)
+            if known_answers:
+                print(f"Loaded {len(known_answers)} known answers from {known_answers_path}")
 
     sources = []
 
-    # Source -1: NumberGuess scatter shot (priority -2, queue_priority 20)
-    if not args.no_guess and answer_suffix:
-        try:
-            gmin, gmax = [int(x.strip()) for x in args.guess_range.split(",")]
-        except ValueError:
-            gmin, gmax = 3, 7
-        sources.append(
-            NumberGuessCommentSource(
-                guess_range=(gmin, gmax),
-                suffix=answer_suffix,
+    if first_answer_mode == "auto":
+        # Source -1: NumberGuess scatter shot (priority -2, queue_priority 20)
+        if not args.no_guess and answer_suffix:
+            try:
+                gmin, gmax = [int(x.strip()) for x in args.guess_range.split(",")]
+            except ValueError:
+                gmin, gmax = 3, 7
+            sources.append(
+                NumberGuessCommentSource(
+                    guess_range=(gmin, gmax),
+                    suffix=answer_suffix,
+                )
             )
-        )
-        print(f"NumberGuess enabled: range={gmin}-{gmax}, suffix={answer_suffix!r}")
+            print(f"NumberGuess enabled: range={gmin}-{gmax}, suffix={answer_suffix!r}")
 
-    # Source 0: TemplateMatch (priority -1, instant ~0ms)
-    enable_math = not args.no_math
-    if rush_templates or known_answers or enable_math:
-        sources.append(
-            TemplateMatchCommentSource(
-                templates=rush_templates,
-                known_answers=known_answers,
-                known_keywords=known_keywords,
-                answer_suffix=answer_suffix,
-                enable_math=enable_math,
+        # Source 0: TemplateMatch (priority -1, instant ~0ms)
+        enable_math = not args.no_math
+        if rush_templates or known_answers or enable_math:
+            sources.append(
+                TemplateMatchCommentSource(
+                    templates=rush_templates,
+                    known_answers=known_answers,
+                    known_keywords=known_keywords,
+                    answer_suffix=answer_suffix,
+                    enable_math=enable_math,
+                )
             )
-        )
-        print(f"TemplateMatch enabled: known_answers={len(known_answers)}, "
-              f"templates={len(rush_templates)}, math={enable_math}")
+            print(f"TemplateMatch enabled: known_answers={len(known_answers)}, "
+                  f"templates={len(rush_templates)}, math={enable_math}")
+    else:
+        print("First-answer mode=ai_ocr_only: disable NumberGuess/TemplateMatch")
 
     # Source 1: OCR (priority 0, fastest)
     if ocr_provider:
@@ -275,12 +323,16 @@ def main() -> None:
         print("Error: no comment sources available")
         return
 
+    dedup_enabled = os.getenv("PYWEIXIN_MULTI_SOURCE_DEDUP", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
     # Create multi-source callback
     ai_callback = create_multi_source_streaming_callback(
         sources=sources,
         max_comments=max_comments,
         max_guess_comments=5,
-        dedup=True,
+        dedup=dedup_enabled,
         verbose=True,
     )
 
@@ -303,7 +355,9 @@ def main() -> None:
     print(f"Monitor end:   {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Poll interval: {poll_interval:.2f}s")
     print(f"Max comments:  {max_comments}")
+    print(f"First mode:    {first_answer_mode}")
     print(f"Comment sources: {[s.__class__.__name__ for s in sources]}")
+    print(f"Dedup enabled: {dedup_enabled}")
     print(f"Output dir:    {output_dir}")
     print("=" * 60)
 
@@ -325,12 +379,18 @@ def main() -> None:
     force_reset = os.getenv("PYWEIXIN_FORCE_RESET_COMMENTED", "1").strip().lower() in {
         "1", "true", "yes"
     }
+    force_reset_last_fingerprint = os.getenv(
+        "PYWEIXIN_FORCE_RESET_LAST_FINGERPRINT", "1"
+    ).strip().lower() in {"1", "true", "yes"}
 
     if already_commented:
         if force_reset:
             print("Already commented in previous state, force reset enabled")
             already_commented = False
             state["commented"] = False
+            if force_reset_last_fingerprint:
+                state["last_fingerprint"] = ""
+                print("Force reset also cleared last_fingerprint")
             save_state()
         else:
             print("Already commented in previous state, stop to avoid duplicate")
@@ -338,9 +398,9 @@ def main() -> None:
             return
 
     # Set environment for fast_first_batch mode
-    os.environ["PYWEIXIN_HOOK_ENABLED"] = "1"
-    os.environ["PYWEIXIN_HOOK_BATCH_MODE"] = "fast_first_batch"
-    os.environ["PYWEIXIN_HOOK_MAX_CONCURRENCY"] = "1"  # Serial Mode
+    os.environ.setdefault("PYWEIXIN_HOOK_ENABLED", "1")
+    os.environ.setdefault("PYWEIXIN_HOOK_BATCH_MODE", "fast_first_batch")
+    os.environ.setdefault("PYWEIXIN_HOOK_MAX_CONCURRENCY", "1")  # Serial Mode
 
     loops = 0
     last_fingerprint = state.get("last_fingerprint", "")
@@ -417,8 +477,29 @@ def main() -> None:
             fingerprint = str(result.get("fingerprint", ""))
             content = str(result.get("content", ""))
             author = str(result.get("author", ""))
-            preview = (content[:60] + "...") if content else "(empty)"
+            preview = (content[:120] + "...") if content else "(empty)"
             print(f"[{now.strftime('%H:%M:%S')}] author={author} content={preview}")
+
+            retry_same_post_on_fail = os.getenv(
+                "PYWEIXIN_RETRY_SAME_FINGERPRINT_ON_POST_FAIL", "1"
+            ).strip().lower() in {"1", "true", "yes"}
+            if (
+                retry_same_post_on_fail
+                and result.get("comment_attempted")
+                and not result.get("comment_posted")
+            ):
+                print(
+                    f"[{now.strftime('%H:%M:%S')}] comment attempt failed, "
+                    "keep same fingerprint for retry"
+                )
+                if moments_window is not None:
+                    try:
+                        moments_window.close()
+                    except Exception:
+                        pass
+                moments_window = None
+                time.sleep(poll_interval)
+                continue
 
             # Check if commented
             if result.get("ai_answer"):

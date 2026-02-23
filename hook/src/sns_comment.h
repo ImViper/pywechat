@@ -30,6 +30,9 @@ struct CommentResult {
     uintptr_t crash_rbp = 0;
     // arg1 mode used
     std::string arg1_mode;
+    bool arg1_ctx_written = false;
+    bool direct_ctx_available = false;
+    bool direct_tls_override_enabled = false;
 };
 
 /**
@@ -111,6 +114,15 @@ uint64_t get_capture_age_ms();
 uint32_t get_capture_thread_id();
 bool has_request_template();
 bool has_arg1_template();
+uint32_t get_arg1_ctx_patch_hits();
+uint32_t get_hook_hit_count();
+uint32_t get_hook_top_hit_count();
+bool is_tls_accessor_hook_installed();
+bool is_arg1_ctx_helper_hook_installed();
+uintptr_t get_tls_accessor_addr();
+uintptr_t get_arg1_ctx_helper_addr();
+int get_tls_accessor_hook_last_status();
+int get_arg1_ctx_helper_hook_last_status();
 
 // ===== 直接调用 (experimental, may crash) =====
 

@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from pyweixin.runtime_env import apply_runtime_env, load_and_apply_runtime_env
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
@@ -62,46 +64,29 @@ def main() -> None:
         return
     os.environ["ARK_API_KEY"] = api_key
 
-    # OCR optimization
-    os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-    os.environ["PYWEIXIN_OCR_DET_MODEL"] = "PP-OCRv5_mobile_det"
-    os.environ["PYWEIXIN_OCR_REC_MODEL"] = "PP-OCRv5_mobile_rec"
-    os.environ["PYWEIXIN_OCR_CPU_THREADS"] = "8"
-    os.environ["PYWEIXIN_OCR_MAX_SIDE"] = "560"
-    os.environ["PYWEIXIN_OCR_LIMIT_TYPE"] = "max"
-    os.environ.setdefault("PYWEIXIN_OCR_COUNT_MAX", "20")
-    # Fast-first stability/perf defaults
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_PRE_HOOK", "0")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_DEFER_IMAGES", "1")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_EDITOR_PRELOAD", "0")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_COLLECT_TIMEOUT_S", "6")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_QUICK_CAPTURE", "0")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_FLUSH_EARLY", "0")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_FLUSH_MIN_READY", "1")
-    # Early hook scatter shot after first UI comment (speed strategy).
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER", "0")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER_VALUES", "1,2,3")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER_MAX", "3")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER_STOP_ON_FAIL", "1")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER_MODE", "capture_thread")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER_WAIT_MS", "650")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER_SETTLE_MS", "140")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER_STRATEGY", "dispatcher_serial")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER_GAP_MS", "90")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER_HOOK_WAIT_MS", "650")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_SCATTER_UI_FALLBACK", "0")
-    os.environ.setdefault("PYWEIXIN_FAST_FIRST_POST_FIRST_REMAINING_EARLY", "0")
-    os.environ.setdefault("PYWEIXIN_UI_SEND_RETRY", "1")
-    os.environ.setdefault("PYWEIXIN_UI_SEND_RETRY_GAP_MS", "120")
-    # AI optimization (keep model unchanged, reduce image upload/infer cost)
-    os.environ.setdefault("PYWEIXIN_AI_IMAGE_OPTIMIZE", "1")
-    os.environ.setdefault("PYWEIXIN_AI_IMAGE_MAX_SIDE", "960")
-    os.environ.setdefault("PYWEIXIN_AI_IMAGE_JPEG_QUALITY", "84")
-    os.environ.setdefault("PYWEIXIN_AI_IMAGE_OPT_MIN_SIDE", "1100")
-    os.environ.setdefault("PYWEIXIN_ARK_MAX_TOKENS", "16")
-    os.environ.setdefault("PYWEIXIN_ARK_TEMPERATURE", "0.0")
-    os.environ.setdefault("PYWEIXIN_ARK_TOP_P", "0.6")
-    os.environ.setdefault("PYWEIXIN_ARK_TIMEOUT_SEC", "4.5")
+    # Runtime tuning now comes from config/rush_runtime_env.json (profile=startup).
+    # Fallback to a tiny in-code baseline if config file is missing.
+    fallback_defaults = {
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
+        "PYWEIXIN_HOOK_ENABLED": "1",
+        "PYWEIXIN_HOOK_BATCH_MODE": "fast_first_batch",
+        "PYWEIXIN_HOOK_MAX_CONCURRENCY": "1",
+    }
+    apply_runtime_env(fallback_defaults, only_if_missing=True)
+    runtime_path, runtime_profile, runtime_applied = load_and_apply_runtime_env(
+        config_path=PROJECT_ROOT / "config" / "rush_runtime_env.json",
+        profile="startup",
+        only_if_missing=True,
+    )
+    if runtime_applied:
+        print(
+            f"[config] loaded runtime profile={runtime_profile or 'startup'} "
+            f"from {runtime_path} ({len(runtime_applied)} keys)"
+        )
+    else:
+        print(f"[config] runtime config not loaded from {runtime_path}, using fallback defaults")
 
     # User input
     target_author = input("[必填] 请输入要抢答的好友名称: ").strip()

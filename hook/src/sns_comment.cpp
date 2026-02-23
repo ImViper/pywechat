@@ -376,6 +376,8 @@ static bool g_hook_installed = false;
 static bool g_hook_top_installed = false;
 static bool g_tls_accessor_hook_installed = false;
 static bool g_arg1_ctx_helper_hook_installed = false;
+static int g_tls_accessor_hook_last_status = 0;   // MH_STATUS code (0=unknown/not-run)
+static int g_arg1_ctx_helper_hook_last_status = 0;
 static volatile int g_hook_hit_count = 0;       // total hook callbacks
 static volatile int g_hook_top_hit_count = 0;    // total TOP hook callbacks
 
@@ -398,6 +400,9 @@ static bool g_capture_tls_slot_0x358_ready = false;
 
 // Worker-scope switch: only override TLS accessor on piggyback parallel workers.
 static thread_local bool t_piggyback_parallel_worker = false;
+// Direct-call fallback switch: only enabled for current worker thread/call when
+// arg1 helper hook is unavailable and we need capture-thread TLS context.
+static thread_local bool t_force_tls_override_direct_call = false;
 
 // =====================================================================
 // Cached request->+0x368 value (set by g_original_fn on capture thread)
@@ -960,10 +965,22 @@ static void* __fastcall hooked_tls_accessor(int slot) {
         return value;
     }
 
-    // Worker thread: DO NOT override TLS accessor
-    // Let it return NULL - arg1_ctx_helper will patch arg1->+0x368 instead
-    // Overriding causes crashes because TLS container is not thread-safe
-    if (t_piggyback_parallel_worker && (!value || !looks_like_user_pointer(value))) {
+    // Worker-thread fallback: if helper hook is unavailable, direct-call can
+    // force a temporary TLS override for this call only. For parallel workers,
+    // keep override behind g_tls_override_enabled kill switch.
+    const bool override_allowed =
+        t_force_tls_override_direct_call ||
+        (t_piggyback_parallel_worker && g_tls_override_enabled);
+    if (override_allowed &&
+        (!value || !looks_like_user_pointer(value)) &&
+        g_capture_tls_accessor_ready &&
+        looks_like_user_pointer(g_capture_tls_accessor_value)) {
+        ++g_tls_accessor_override_hits;
+        return g_capture_tls_accessor_value;
+    }
+
+    if ((t_piggyback_parallel_worker || t_force_tls_override_direct_call) &&
+        (!value || !looks_like_user_pointer(value))) {
         ++g_tls_accessor_worker_miss;
     }
 
@@ -971,7 +988,7 @@ static void* __fastcall hooked_tls_accessor(int slot) {
 }
 
 static void* __fastcall hooked_arg1_ctx_helper(void* arg1, void* a2, void* a3, void* a4) {
-    if (t_piggyback_parallel_worker && arg1) {
+    if (t_piggyback_parallel_worker) {
         void* ctx = nullptr;
         if (g_cached_req_0x368_valid) {
             ctx = g_cached_req_0x368;
@@ -982,15 +999,20 @@ static void* __fastcall hooked_arg1_ctx_helper(void* arg1, void* a2, void* a3, v
             ctx = reinterpret_cast<void*>(g_capture_tls_slot_0x358_ptr);
         }
         if (ctx && looks_like_user_pointer(ctx)) {
-            bool patched = safe_copy_bytes(
-                reinterpret_cast<uint8_t*>(arg1) + 0x368, &ctx, sizeof(ctx));
-            if (patched) {
-                int hit = ++g_arg1_ctx_patch_hits;
-                if (hit <= 12) {
-                    spdlog::info("arg1_ctx_helper patch hit#{} arg1={:#x} ctx={:#x}",
-                                 hit, (uintptr_t)arg1, (uintptr_t)ctx);
+            if (arg1) {
+                bool patched = safe_copy_bytes(
+                    reinterpret_cast<uint8_t*>(arg1) + 0x368, &ctx, sizeof(ctx));
+                if (patched) {
+                    int hit = ++g_arg1_ctx_patch_hits;
+                    if (hit <= 16) {
+                        spdlog::info("arg1_ctx_helper patch hit#{} arg1={:#x} ctx={:#x}",
+                                     hit, (uintptr_t)arg1, (uintptr_t)ctx);
+                    }
                 }
             }
+            // Worker direct-call: return a valid context directly and skip original helper.
+            // This avoids crashes in original helper when worker thread has no valid TLS.
+            return ctx;
         }
     }
     if (!g_original_arg1_ctx_helper) {
@@ -1009,6 +1031,7 @@ static void* __fastcall hooked_cgi_A_caller_2(
     int64_t arg2,
     void* arg3)
 {
+    g_hook_hit_count++;
     auto req_bytes = reinterpret_cast<uint8_t*>(request);
 
     // --- 1. 捕获运行时状态 ---
@@ -1792,21 +1815,25 @@ bool install_comment_hook() {
 
     if (g_tls_accessor_addr != 0) {
         auto tls_target = reinterpret_cast<LPVOID>(g_tls_accessor_addr);
+        g_tls_accessor_hook_last_status = 0;
         status = MH_CreateHook(
             tls_target,
             reinterpret_cast<LPVOID>(&hooked_tls_accessor),
             reinterpret_cast<LPVOID*>(&g_original_tls_accessor)
         );
         if (status != MH_OK) {
+            g_tls_accessor_hook_last_status = static_cast<int>(status);
             spdlog::warn("MH_CreateHook tls accessor failed: {}", MH_StatusToString(status));
         } else {
             status = MH_EnableHook(tls_target);
             if (status != MH_OK) {
+                g_tls_accessor_hook_last_status = static_cast<int>(status);
                 spdlog::warn("MH_EnableHook tls accessor failed: {}", MH_StatusToString(status));
                 MH_RemoveHook(tls_target);
                 g_original_tls_accessor = nullptr;
             } else {
                 g_tls_accessor_hook_installed = true;
+                g_tls_accessor_hook_last_status = static_cast<int>(MH_OK);
                 spdlog::info("tls accessor hook installed @ {:#x}", g_tls_accessor_addr);
             }
         }
@@ -1814,21 +1841,25 @@ bool install_comment_hook() {
 
     if (g_arg1_ctx_helper_addr != 0) {
         auto helper_target = reinterpret_cast<LPVOID>(g_arg1_ctx_helper_addr);
+        g_arg1_ctx_helper_hook_last_status = 0;
         status = MH_CreateHook(
             helper_target,
             reinterpret_cast<LPVOID>(&hooked_arg1_ctx_helper),
             reinterpret_cast<LPVOID*>(&g_original_arg1_ctx_helper)
         );
         if (status != MH_OK) {
+            g_arg1_ctx_helper_hook_last_status = static_cast<int>(status);
             spdlog::warn("MH_CreateHook arg1 ctx helper failed: {}", MH_StatusToString(status));
         } else {
             status = MH_EnableHook(helper_target);
             if (status != MH_OK) {
+                g_arg1_ctx_helper_hook_last_status = static_cast<int>(status);
                 spdlog::warn("MH_EnableHook arg1 ctx helper failed: {}", MH_StatusToString(status));
                 MH_RemoveHook(helper_target);
                 g_original_arg1_ctx_helper = nullptr;
             } else {
                 g_arg1_ctx_helper_hook_installed = true;
+                g_arg1_ctx_helper_hook_last_status = static_cast<int>(MH_OK);
                 spdlog::info("arg1 ctx helper hook installed @ {:#x}", g_arg1_ctx_helper_addr);
             }
         }
@@ -1989,6 +2020,42 @@ bool has_request_template() {
 bool has_arg1_template() {
     std::lock_guard<std::mutex> lock(g_capture_mutex);
     return g_arg1_template_ready;
+}
+
+uint32_t get_arg1_ctx_patch_hits() {
+    return static_cast<uint32_t>(g_arg1_ctx_patch_hits.load());
+}
+
+uint32_t get_hook_hit_count() {
+    return static_cast<uint32_t>(g_hook_hit_count);
+}
+
+uint32_t get_hook_top_hit_count() {
+    return static_cast<uint32_t>(g_hook_top_hit_count);
+}
+
+bool is_tls_accessor_hook_installed() {
+    return g_tls_accessor_hook_installed;
+}
+
+bool is_arg1_ctx_helper_hook_installed() {
+    return g_arg1_ctx_helper_hook_installed;
+}
+
+uintptr_t get_tls_accessor_addr() {
+    return g_tls_accessor_addr;
+}
+
+uintptr_t get_arg1_ctx_helper_addr() {
+    return g_arg1_ctx_helper_addr;
+}
+
+int get_tls_accessor_hook_last_status() {
+    return g_tls_accessor_hook_last_status;
+}
+
+int get_arg1_ctx_helper_hook_last_status() {
+    return g_arg1_ctx_helper_hook_last_status;
 }
 
 // =====================================================================
@@ -2224,6 +2291,55 @@ CommentResult sns_do_comment(const std::string& sns_id,
     int64_t arg2 = snapshot_arg2;
     void* arg3 = snapshot_arg3;
 
+    // Pipe-thread direct-call fallback: proactively patch arg1->+0x368 using
+    // best-known context so we do not depend on arg1 helper hook.
+    bool arg1_ctx_written = false;
+    void* direct_ctx_0x368 = nullptr;
+    if (g_cached_req_0x368_valid && looks_like_vtable_object(g_cached_req_0x368)) {
+        direct_ctx_0x368 = g_cached_req_0x368;
+    }
+    if (!direct_ctx_0x368 &&
+        snapshot_arg1_template_ready &&
+        ARG1_TEMPLATE_SIZE > 0x370) {
+        void* parsed = nullptr;
+        uint64_t raw = 0;
+        int tag_bits = 0;
+        if (read_tagged_context_ptr(snapshot_arg1_template.data(), 0x368, &parsed, &raw, &tag_bits)) {
+            direct_ctx_0x368 = parsed;
+            spdlog::debug("sns_do_comment: direct ctx from arg1 template raw={:#x} tag_bits={}",
+                          raw, tag_bits);
+        }
+    }
+    if (!direct_ctx_0x368 && snapshot_template_ready && REQUEST_CALL_BUFFER_SIZE > 0x370) {
+        void* parsed = nullptr;
+        uint64_t raw = 0;
+        int tag_bits = 0;
+        if (read_tagged_context_ptr(snapshot_template.data(), 0x368, &parsed, &raw, &tag_bits)) {
+            direct_ctx_0x368 = parsed;
+            spdlog::debug("sns_do_comment: direct ctx from req template raw={:#x} tag_bits={}",
+                          raw, tag_bits);
+        }
+    }
+    if (!direct_ctx_0x368 &&
+        g_capture_tls_accessor_ready &&
+        looks_like_user_pointer(g_capture_tls_accessor_value)) {
+        direct_ctx_0x368 = normalize_ctx_object_ptr(
+            g_capture_tls_accessor_value,
+            "direct_call_tls_accessor");
+    }
+    if (direct_ctx_0x368 && looks_like_vtable_object(direct_ctx_0x368)) {
+        g_cached_req_0x368 = direct_ctx_0x368;
+        g_cached_req_0x368_valid = true;
+        if (arg1 == arg1_buf.data() && ARG1_TEMPLATE_SIZE > 0x370) {
+            arg1_ctx_written = safe_copy_bytes(
+                arg1_buf.data() + 0x368,
+                &direct_ctx_0x368,
+                sizeof(direct_ctx_0x368));
+        }
+    }
+    result.arg1_ctx_written = arg1_ctx_written;
+    result.direct_ctx_available = (direct_ctx_0x368 != nullptr);
+
     // Arm VEH to capture crash details before SEH swallows the exception
     memset(&g_crash_diag, 0, sizeof(g_crash_diag));
     PVOID veh_handle = AddVectoredExceptionHandler(1 /*first handler*/, diag_veh);
@@ -2244,12 +2360,81 @@ CommentResult sns_do_comment(const std::string& sns_id,
         spdlog::info("sns_do_comment: copied {} TLS slots", tls_copied_count);
     }
 
+    // For direct-call on non-capture thread (pipe thread), temporarily enable
+    // worker context patch path so hooked_arg1_ctx_helper can patch arg1+0x368.
+    const DWORD current_tid = GetCurrentThreadId();
+    const bool enable_worker_ctx_patch = (current_tid != snapshot_capture_thread_id);
+    const bool prev_worker_flag = t_piggyback_parallel_worker;
+    const bool enable_direct_tls_override =
+        enable_worker_ctx_patch &&
+        !g_arg1_ctx_helper_hook_installed &&
+        g_capture_tls_accessor_ready &&
+        looks_like_user_pointer(g_capture_tls_accessor_value);
+    result.direct_tls_override_enabled = enable_direct_tls_override;
+    const bool prev_direct_tls_override = t_force_tls_override_direct_call;
+    if (enable_worker_ctx_patch) {
+        t_piggyback_parallel_worker = true;
+        spdlog::debug(
+            "sns_do_comment: enable worker ctx patch (current_tid={}, capture_tid={}, arg1_ctx_written={})",
+            current_tid, snapshot_capture_thread_id, arg1_ctx_written);
+    }
+    if (enable_direct_tls_override) {
+        t_force_tls_override_direct_call = true;
+        spdlog::debug("sns_do_comment: enable direct TLS override for this call");
+    }
+
+    // Keep pristine request/arg1 bytes for optional secondary call retry.
+    const auto req_initial = req_buf;
+    const auto arg1_initial = arg1_buf;
+
     // SEH 保护调用 (通过独立函数避免 C2712)
     auto call_start = std::chrono::steady_clock::now();
     int seh_error = 0;
     void* ret = seh_call_comment_fn(call_fn, req_bytes, arg1, arg2, arg3, &seh_error);
+    int seh_error_primary = seh_error;
+    void* ret_primary = ret;
+    bool used_top_fallback = false;
+
+    // If caller2 path crashes, retry once via TOP entry.
+    if (seh_error != 0 && g_top_fn_addr != 0) {
+        fn_SnsCommentSubmit top_fn = g_original_top_fn;
+        const char* top_method = "top_trampoline";
+        if (!top_fn) {
+            top_fn = reinterpret_cast<fn_SnsCommentSubmit>(g_top_fn_addr);
+            top_method = "top_direct";
+        }
+        if (top_fn && top_fn != call_fn) {
+            memcpy(req_bytes, req_initial.data(), REQUEST_CALL_BUFFER_SIZE);
+            if (arg1 == arg1_buf.data()) {
+                arg1_buf = arg1_initial;
+                arg1 = arg1_buf.data();
+            }
+            int seh_error_top = 0;
+            void* ret_top = seh_call_comment_fn(top_fn, req_bytes, arg1, arg2, arg3, &seh_error_top);
+            if (seh_error_top == 0) {
+                seh_error = 0;
+                ret = ret_top;
+                call_method = top_method;
+                used_top_fallback = true;
+                spdlog::warn(
+                    "sns_do_comment: primary SEH {:#x}, top fallback succeeded via {}",
+                    seh_error_primary, top_method);
+            } else {
+                spdlog::warn(
+                    "sns_do_comment: primary SEH {:#x}, top fallback SEH {:#x}",
+                    seh_error_primary, seh_error_top);
+            }
+        }
+    }
     auto call_end = std::chrono::steady_clock::now();
     auto call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(call_end - call_start).count();
+
+    if (enable_worker_ctx_patch) {
+        t_piggyback_parallel_worker = prev_worker_flag;
+    }
+    if (enable_direct_tls_override) {
+        t_force_tls_override_direct_call = prev_direct_tls_override;
+    }
 
     // Restore TLS slots
     if (tls_copy) {
@@ -2290,17 +2475,19 @@ CommentResult sns_do_comment(const std::string& sns_id,
         result.crash_rsp = g_crash_diag.rsp;
         result.crash_rbp = g_crash_diag.rbp;
         spdlog::error("sns_do_comment: SEH exception code={:#x}, latency={}ms, "
-                      "crash_rip={:#x}, fault_addr={:#x}, fault_type={}",
+                      "crash_rip={:#x}, fault_addr={:#x}, fault_type={}, "
+                      "primary_seh={:#x}, primary_ret={:#x}, used_top_fallback={}",
                       seh_error, call_ms,
-                      g_crash_diag.rip, g_crash_diag.fault_addr, g_crash_diag.fault_type);
+                      g_crash_diag.rip, g_crash_diag.fault_addr, g_crash_diag.fault_type,
+                      seh_error_primary, (uintptr_t)ret_primary, used_top_fallback);
     } else {
         result.success = (ret != nullptr);
         if (!result.success) {
             result.error_code = 30;
             result.error_message = "WeChat returned null";
         }
-        spdlog::info("sns_do_comment: ret={:#x}, success={}, latency={}ms",
-                     (uintptr_t)ret, result.success, call_ms);
+        spdlog::info("sns_do_comment: ret={:#x}, success={}, latency={}ms, method={}, used_top_fallback={}",
+                     (uintptr_t)ret, result.success, call_ms, call_method, used_top_fallback);
     }
 
     return result;

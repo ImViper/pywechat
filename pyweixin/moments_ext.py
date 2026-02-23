@@ -1534,6 +1534,9 @@ def fetch_and_comment_from_moments_feed(
         fast_first_pre_hook_enabled = os.environ.get(
             "PYWEIXIN_FAST_FIRST_PRE_HOOK", "0"
         ).strip().lower() in {"1", "true", "yes", "on"}
+        first_answer_mode_early = os.environ.get(
+            "PYWEIXIN_FIRST_ANSWER_MODE", "auto"
+        ).strip().lower()
         if os.environ.get('PYWEIXIN_HOOK_ENABLED', '0') == '1':
             try:
                 from .comment_dispatcher import CommentDispatcher
@@ -1689,6 +1692,7 @@ def fetch_and_comment_from_moments_feed(
             and is_streaming
             and image_count > 0
             and (not first_comment_done)
+            and first_answer_mode_early != "ai_ocr_only"
             and _use_hook
             and _hook_dispatcher is not None
             and getattr(_hook_dispatcher, "_hook_sender", None) is not None
@@ -2026,10 +2030,15 @@ def fetch_and_comment_from_moments_feed(
                     # ============================================================
                     print("[debug:stream] fast_first_batch mode: waiting for first answer")
 
+                    editor_preload_enabled = os.environ.get(
+                        "PYWEIXIN_FAST_FIRST_EDITOR_PRELOAD", "0"
+                    ).strip().lower() in {"1", "true", "yes", "on"}
                     editor_preload_started = False
+                    editor_preload_done = threading.Event()
+                    editor_preload_ok = False
 
                     def _preload_comment_editor_for_fallback() -> None:
-                        nonlocal editor_preload_started
+                        nonlocal editor_preload_started, editor_preload_ok
                         if editor_preload_started:
                             return
                         if _hook_dispatcher is None or getattr(_hook_dispatcher, "_ui_sender", None) is None:
@@ -2037,6 +2046,7 @@ def fetch_and_comment_from_moments_feed(
                         editor_preload_started = True
 
                         def _run_preload() -> None:
+                            nonlocal editor_preload_ok
                             try:
                                 _opened = open_comment_editor(
                                     moments_window,
@@ -2044,21 +2054,198 @@ def fetch_and_comment_from_moments_feed(
                                     use_offset_fix=False,
                                     pre_move_coords=center_point,
                                 )
+                                editor_preload_ok = bool(_opened)
                                 if _opened:
                                     print("[debug:stream] editor pre-opened while waiting first answer")
                                 else:
                                     print("[debug:stream] editor pre-open failed while waiting first answer")
                             except Exception as _pre_err:
                                 print(f"[debug:stream] editor preload error: {_pre_err}")
+                            finally:
+                                editor_preload_done.set()
 
                         try:
                             threading.Thread(target=_run_preload, daemon=True).start()
                         except Exception as _thread_err:
                             print(f"[debug:stream] editor preload thread start failed: {_thread_err}")
+                            editor_preload_done.set()
 
-                    editor_preload_enabled = os.environ.get(
-                        "PYWEIXIN_FAST_FIRST_EDITOR_PRELOAD", "0"
-                    ).strip().lower() in {"1", "true", "yes", "on"}
+                    def _try_send_first_using_preloaded_editor(first_text: str) -> bool | None:
+                        if not editor_preload_enabled or not editor_preload_started:
+                            return None
+                        try:
+                            preload_wait_ms = int(
+                                os.environ.get(
+                                    "PYWEIXIN_FAST_FIRST_EDITOR_PRELOAD_WAIT_MS", "180"
+                                )
+                            )
+                        except Exception:
+                            preload_wait_ms = 180
+                        if preload_wait_ms < 0:
+                            preload_wait_ms = 0
+                        if preload_wait_ms > 1200:
+                            preload_wait_ms = 1200
+                        try:
+                            preload_grace_ms = int(
+                                os.environ.get(
+                                    "PYWEIXIN_FAST_FIRST_EDITOR_PRELOAD_GRACE_MS", "0"
+                                )
+                            )
+                        except Exception:
+                            preload_grace_ms = 0
+                        if preload_grace_ms < 0:
+                            preload_grace_ms = 0
+                        if preload_grace_ms > 1200:
+                            preload_grace_ms = 1200
+
+                        if not editor_preload_done.wait(preload_wait_ms / 1000.0):
+                            # Grace wait avoids immediate fallback/re-open churn when the
+                            # preloader is just about to expose the editor.
+                            if preload_grace_ms > 0 and wait_comment_editor_state(
+                                moments_window,
+                                opened=True,
+                                timeout=preload_grace_ms / 1000.0,
+                                poll=0.04,
+                            ):
+                                print(
+                                    f"[debug:stream] editor preload became visible during "
+                                    f"grace wait ({preload_grace_ms}ms)"
+                                )
+                            else:
+                                print(
+                                    f"[debug:stream] editor preload pending after {preload_wait_ms}ms, "
+                                    "falling back to normal UI flow"
+                                )
+                                return None
+                        if not editor_preload_ok:
+                            # In race windows the preload thread may still be finalizing
+                            # while editor is already visible; trust UI state if present.
+                            if not wait_comment_editor_state(
+                                moments_window, opened=True, timeout=0.08, poll=0.04
+                            ):
+                                print("[debug:stream] editor preload not ready, falling back to normal UI flow")
+                                return None
+                            print("[debug:stream] editor visible despite pending preload flag, continue with preloaded UI")
+                        if not wait_comment_editor_state(
+                            moments_window, opened=True, timeout=0.12, poll=0.04
+                        ):
+                            print("[debug:stream] preloaded editor missing, falling back to normal UI flow")
+                            return None
+
+                        posted = paste_and_send_comment(
+                            moments_window,
+                            first_text,
+                            anchor_mode="list",
+                            anchor_source=comment_listitem,
+                            clear_first=False,
+                            skip_editor_check=True,
+                        )
+                        if posted:
+                            print(f"[debug:stream] first comment posted via ui(preloaded): {first_text}")
+                        else:
+                            print("[debug:stream] ui(preloaded) send failed, will retry normal UI flow")
+                        return bool(posted)
+
+                    def _refresh_first_ui_anchor() -> None:
+                        nonlocal selected_item, comment_listitem, moments_list, center_point
+                        try:
+                            _fresh_list = reacquire_feed_list(retries=4, wait=0.08)
+                            if _fresh_list is not None:
+                                moments_list = _fresh_list
+                                _focused = [
+                                    li
+                                    for li in moments_list.children(control_type='ListItem')
+                                    if li.has_keyboard_focus()
+                                ]
+                                if _focused:
+                                    try:
+                                        _cls = _focused[0].class_name()
+                                    except Exception:
+                                        _cls = ""
+                                    if _cls and ("TimelineCommentCell" not in _cls):
+                                        selected_item = _focused[0]
+                                if selected_item is not None:
+                                    try:
+                                        comment_listitem = resolve_feed_comment_anchor(
+                                            moments_list, selected_item
+                                        )
+                                    except Exception:
+                                        comment_listitem = None
+                                    try:
+                                        center_point = compute_feed_item_center_point(selected_item)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+
+                    def _is_ui_com_unstable(error_message: str) -> bool:
+                        _msg = str(error_message or "")
+                        if not _msg:
+                            return False
+                        _msg_l = _msg.lower()
+                        return (
+                            "-2147220991" in _msg
+                            or "事件无法调用任何订户" in _msg
+                            or "no subscribers" in _msg_l
+                        )
+
+                    def _send_first_via_ui_with_retry(first_text: str) -> tuple[bool, bool, bool]:
+                        """Return (posted, used_preloaded_path, ui_com_unstable)."""
+                        preloaded_posted = _try_send_first_using_preloaded_editor(first_text)
+                        if preloaded_posted is True:
+                            return True, True, False
+
+                        try:
+                            from .comment_dispatcher import UICommentSender
+                        except Exception as _import_err:
+                            print(f"[debug:stream] UICommentSender import failed: {_import_err}")
+                            return False, False, False
+
+                        def _send_once(tag: str) -> tuple[bool, bool]:
+                            try:
+                                ui_sender = UICommentSender(
+                                    moments_window,
+                                    selected_item,
+                                    anchor_mode="list",
+                                    anchor_source=comment_listitem,
+                                    pre_move_coords=center_point,
+                                )
+                                ui_result = ui_sender.send_comment(
+                                    first_text,
+                                    author=result.get("author", ""),
+                                    content_hash=result.get("fingerprint", "")[:16],
+                                )
+                                if ui_result.success:
+                                    print(
+                                        f"[debug:stream] first comment posted via ui({tag}) "
+                                        f"latency={ui_result.latency_ms}ms: {first_text}"
+                                    )
+                                    return True, False
+                                _ui_com_unstable = _is_ui_com_unstable(ui_result.error_message)
+                                print(
+                                    f"[debug:stream] ui({tag}) first send failed: "
+                                    f"{ui_result.error_message or 'unknown'}"
+                                )
+                                return False, _ui_com_unstable
+                            except Exception as _ui_exc:
+                                print(f"[debug:stream] ui({tag}) first send exception: {_ui_exc}")
+                                return False, _is_ui_com_unstable(str(_ui_exc))
+
+                        ui_com_unstable = False
+
+                        _ok, _com_unstable = _send_once("sender")
+                        ui_com_unstable = ui_com_unstable or _com_unstable
+                        if _ok:
+                            return True, False, ui_com_unstable
+
+                        # One extra recovery attempt with a fresh list item/anchor.
+                        _refresh_first_ui_anchor()
+                        _ok, _com_unstable = _send_once("sender+refresh")
+                        ui_com_unstable = ui_com_unstable or _com_unstable
+                        if _ok:
+                            return True, False, ui_com_unstable
+                        return False, False, ui_com_unstable
+
                     if editor_preload_enabled:
                         _preload_comment_editor_for_fallback()
                     else:
@@ -2078,11 +2265,29 @@ def fetch_and_comment_from_moments_feed(
                         first_answer = None
                         first_start = time.time()
                         try:
-                            first_answer = answer_queue.get(timeout=2.0)  # 最多等 2 秒
+                            first_answer_wait_s = float(
+                                os.environ.get(
+                                    "PYWEIXIN_FAST_FIRST_FIRST_ANSWER_TIMEOUT_S",
+                                    "2.0",
+                                )
+                            )
+                        except Exception:
+                            first_answer_wait_s = 2.0
+                        if first_answer_mode_early == "ai_ocr_only" and first_answer_wait_s < 4.0:
+                            first_answer_wait_s = 6.0
+                        if first_answer_wait_s < 0.5:
+                            first_answer_wait_s = 0.5
+                        if first_answer_wait_s > 20.0:
+                            first_answer_wait_s = 20.0
+                        try:
+                            first_answer = answer_queue.get(timeout=first_answer_wait_s)
                             first_elapsed = int((time.time() - first_start) * 1000)
                             print(f"[debug:stream] first answer ready ({first_elapsed}ms): {first_answer}")
                         except _queue_mod.Empty:
-                            print("[debug:stream] first answer timeout, fallback to batch")
+                            print(
+                                f"[debug:stream] first answer timeout "
+                                f"({first_answer_wait_s:.2f}s), fallback to batch"
+                            )
 
                         posted_any = False
 
@@ -2093,23 +2298,28 @@ def fetch_and_comment_from_moments_feed(
                                 try:
                                     # Fast-first baseline: send first comment via UI directly
                                     # to avoid hook probing noise/race on unstable capture state.
-                                    first_ui_ok = comment_flow(
-                                        moments_window,
-                                        selected_item,
-                                        [first_answer],
-                                        anchor_mode="list",
-                                        anchor_source=comment_listitem,
-                                        use_offset_fix=False,
-                                        clear_first=False,
-                                        pre_move_coords=center_point,
-                                    )
+                                    first_ui_ok = False
+                                    ui_com_unstable = False
+                                    first_ui_ok, preloaded_path, ui_com_unstable = _send_first_via_ui_with_retry(first_answer)
                                     posted_any = bool(first_ui_ok)
                                     comment_count = 1 if posted_any else 0
 
                                     if first_ui_ok:
                                         all_answers.append(first_answer)
-                                        print(f"[debug:stream] first comment posted via ui: {first_answer}")
+                                        if not preloaded_path:
+                                            print(f"[debug:stream] first comment posted via ui: {first_answer}")
                                     else:
+                                        if ui_com_unstable:
+                                            pending_first_answer = first_answer
+                                            result['ai_answer'] = first_answer
+                                            result['comment_posted'] = False
+                                            if not result.get('error'):
+                                                result['error'] = 'ui com unstable, retry next poll'
+                                            print(
+                                                "[debug:stream] ui COM unstable on first send, "
+                                                "skip slow fallback and retry in next poll"
+                                            )
+                                            return result
                                         print("[debug:stream] first comment UI failed, trying hook fallback once")
                                         first_result = _hook_dispatcher.post_comment(
                                             first_answer,

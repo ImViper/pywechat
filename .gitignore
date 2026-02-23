@@ -18,6 +18,7 @@ rush_state_*.json
 # Local secrets
 config/.local_secrets.json
 config/sns_click_offsets.local.json
+config/.local_env.bat
 
 # Local debug/benchmark artifacts
 benchmark_results.json

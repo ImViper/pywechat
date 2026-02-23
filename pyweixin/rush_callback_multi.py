@@ -13,6 +13,93 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Thread
 from typing import Any, Callable, Protocol
 
+try:
+    from PIL import Image as _PILImage
+except Exception:  # pragma: no cover - optional dependency
+    _PILImage = None
+
+
+# ---------------------------------------------------------------------------
+# AI image optimization (for speed, OCR still uses original images)
+# ---------------------------------------------------------------------------
+
+def _prepare_ai_images(image_paths: list[str], verbose: bool = True) -> list[str]:
+    """Optionally downscale images for AI to reduce upload/inference latency."""
+    enable_opt = os.getenv("PYWEIXIN_AI_IMAGE_OPTIMIZE", "1").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if not enable_opt:
+        return image_paths
+    try:
+        max_side = int(os.getenv("PYWEIXIN_AI_IMAGE_MAX_SIDE", "1024"))
+    except Exception:
+        max_side = 1024
+    try:
+        quality = int(os.getenv("PYWEIXIN_AI_IMAGE_JPEG_QUALITY", "86"))
+    except Exception:
+        quality = 86
+    try:
+        min_side = int(os.getenv("PYWEIXIN_AI_IMAGE_OPT_MIN_SIDE", "1100"))
+    except Exception:
+        min_side = 1100
+    if max_side < 512:
+        max_side = 512
+    if max_side > 2048:
+        max_side = 2048
+    if quality < 60:
+        quality = 60
+    if quality > 95:
+        quality = 95
+
+    if _PILImage is None:
+        return image_paths
+
+    prepared: list[str] = []
+    optimized_count = 0
+    start = time.time()
+
+    try:
+        resample = _PILImage.Resampling.BILINEAR
+    except Exception:
+        resample = _PILImage.BILINEAR
+
+    for src in image_paths:
+        if not src or not os.path.isfile(src):
+            continue
+        out_path = src
+        try:
+            with _PILImage.open(src) as im:
+                w, h = im.size
+                long_side = max(w, h)
+                if long_side >= max(min_side, max_side + 1):
+                    scale = max_side / float(long_side)
+                    nw = max(1, int(w * scale))
+                    nh = max(1, int(h * scale))
+                    base, _ = os.path.splitext(src)
+                    out_path = f"{base}.ai_{max_side}.jpg"
+
+                    reuse = False
+                    if os.path.isfile(out_path):
+                        try:
+                            reuse = os.path.getmtime(out_path) >= os.path.getmtime(src) and os.path.getsize(out_path) > 0
+                        except Exception:
+                            reuse = False
+                    if not reuse:
+                        im2 = im.convert("RGB").resize((nw, nh), resample)
+                        im2.save(out_path, format="JPEG", quality=quality)
+                    optimized_count += 1
+        except Exception:
+            out_path = src
+        prepared.append(out_path)
+
+    if verbose and optimized_count > 0:
+        elapsed = int((time.time() - start) * 1000)
+        print(
+            f"[AI] optimized images {optimized_count}/{len(prepared)} "
+            f"({elapsed}ms, max_side={max_side}, q={quality})"
+        )
+    return prepared or image_paths
+
 
 # ---------------------------------------------------------------------------
 # Priority Answer Queue — 优先级队列（AI 答案可以插队散弹猜测）
@@ -334,10 +421,13 @@ class AICommentSource:
         # 支持 DeferredImagePaths — 等待图片就绪
         if hasattr(image_paths, 'wait_and_get'):
             image_paths = image_paths.wait_and_get()
+        if not image_paths:
+            return None
 
         from .rush_callback import try_ai_answer
 
-        return try_ai_answer(content, image_paths, self.ai_provider, verbose=True)
+        ai_images = _prepare_ai_images(image_paths, verbose=True)
+        return try_ai_answer(content, ai_images, self.ai_provider, verbose=True)
 
 
 class CannedCommentSource:
