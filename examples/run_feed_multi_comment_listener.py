@@ -52,7 +52,11 @@ from pyweixin.rush_callback_multi import (
 )
 from pyweixin.rush_engine import load_rush_config
 from pyweixin.moments_ext import fetch_and_comment_from_moments_feed
-from pyweixin.runtime_env import apply_runtime_env, load_and_apply_runtime_env
+from pyweixin.runtime_env import (
+    apply_runtime_env,
+    load_and_apply_runtime_env,
+    load_runtime_env_config,
+)
 from pyweixin.WeChatTools import Navigator
 
 
@@ -70,6 +74,16 @@ def load_api_key() -> str:
 
 
 def main() -> None:
+    def safe_console_print(message: str) -> None:
+        try:
+            print(message)
+        except UnicodeEncodeError:
+            # Fallback for GBK terminals when feed content contains emoji/special symbols.
+            try:
+                print(message.encode("gbk", errors="replace").decode("gbk"))
+            except Exception:
+                print("<unprintable message>")
+
     parser = argparse.ArgumentParser(
         description="Multi-Comment Moments Refresh Listener"
     )
@@ -144,6 +158,7 @@ def main() -> None:
         "PYWEIXIN_HOOK_MAX_CONCURRENCY": "1",
     }
     apply_runtime_env(fallback_defaults, only_if_missing=True)
+    runtime_cfg_path, runtime_cfg = load_runtime_env_config(config_path=args.runtime_config)
     runtime_path, runtime_profile, runtime_applied = load_and_apply_runtime_env(
         config_path=args.runtime_config,
         profile=args.runtime_profile,
@@ -155,13 +170,43 @@ def main() -> None:
             f"path={runtime_path} keys={len(runtime_applied)}"
         )
     else:
-        print(f"Runtime env config not loaded from {runtime_path}, using fallback defaults")
+        if runtime_cfg:
+            print(
+                f"Runtime env parsed from {runtime_cfg_path}, "
+                "no new keys applied (likely already inherited from parent process)"
+            )
+        else:
+            print(f"Runtime env config not loaded from {runtime_path}, using fallback defaults")
 
     first_answer_mode = (
         args.first_answer_mode
         or os.getenv("PYWEIXIN_FIRST_ANSWER_MODE", "auto")
         or "auto"
     ).strip().lower()
+    disable_ocr = os.getenv("PYWEIXIN_DISABLE_OCR", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    print(f"[config] effective first_answer_mode={first_answer_mode}")
+    print(f"[config] effective disable_ocr={disable_ocr}")
+    print("[config] effective runtime params:")
+    for key in [
+        "PYWEIXIN_ARK_MODEL",
+        "PYWEIXIN_ARK_IMAGE_DETAIL",
+        "PYWEIXIN_ARK_TIMEOUT_SEC",
+        "PYWEIXIN_ARK_MAX_TOKENS",
+        "PYWEIXIN_ARK_TEMPERATURE",
+        "PYWEIXIN_ARK_TOP_P",
+        "PYWEIXIN_AI_IMAGE_OPTIMIZE",
+        "PYWEIXIN_AI_IMAGE_MAX_SIDE",
+        "PYWEIXIN_AI_IMAGE_JPEG_QUALITY",
+        "PYWEIXIN_AI_IMAGE_OPT_MIN_SIDE",
+        "PYWEIXIN_HOOK_ENABLED",
+        "PYWEIXIN_HOOK_BATCH_MODE",
+        "PYWEIXIN_HOOK_MAX_CONCURRENCY",
+        "PYWEIXIN_FAST_FIRST_DEFER_IMAGES",
+        "PYWEIXIN_DISABLE_OCR",
+    ]:
+        print(f"  {key}={os.getenv(key, '')}")
 
     # Parse publish time
     try:
@@ -186,23 +231,26 @@ def main() -> None:
     ai_provider = ArkChatProvider(api_key=api_key)
 
     ocr_provider = None
-    try:
-        print("Loading OCR model...")
-        ocr_provider = PaddleOCRProvider(
-            lang="ch",
-            show_log=False,
-            use_angle_cls=False,
-            enable_mkldnn=False,
-            text_detection_model_name=os.getenv("PYWEIXIN_OCR_DET_MODEL", "PP-OCRv5_mobile_det"),
-            text_recognition_model_name=os.getenv("PYWEIXIN_OCR_REC_MODEL", "PP-OCRv5_mobile_rec"),
-            cpu_threads=int(os.getenv("PYWEIXIN_OCR_CPU_THREADS", "8")),
-            text_det_limit_side_len=int(os.getenv("PYWEIXIN_OCR_MAX_SIDE", "1200")),
-            text_det_limit_type=os.getenv("PYWEIXIN_OCR_LIMIT_TYPE", "max"),
-        )
-        ocr_provider._get_ocr()
-        print("OCR model loaded")
-    except Exception:
-        print("Warning: PaddleOCR unavailable, OCR disabled")
+    if disable_ocr:
+        print("OCR disabled by PYWEIXIN_DISABLE_OCR")
+    else:
+        try:
+            print("Loading OCR model...")
+            ocr_provider = PaddleOCRProvider(
+                lang="ch",
+                show_log=False,
+                use_angle_cls=False,
+                enable_mkldnn=False,
+                text_detection_model_name=os.getenv("PYWEIXIN_OCR_DET_MODEL", "PP-OCRv5_mobile_det"),
+                text_recognition_model_name=os.getenv("PYWEIXIN_OCR_REC_MODEL", "PP-OCRv5_mobile_rec"),
+                cpu_threads=int(os.getenv("PYWEIXIN_OCR_CPU_THREADS", "8")),
+                text_det_limit_side_len=int(os.getenv("PYWEIXIN_OCR_MAX_SIDE", "1200")),
+                text_det_limit_type=os.getenv("PYWEIXIN_OCR_LIMIT_TYPE", "max"),
+            )
+            ocr_provider._get_ocr()
+            print("OCR model loaded")
+        except Exception:
+            print("Warning: PaddleOCR unavailable, OCR disabled")
 
     # ----------------------------------------------------------------
     # Auto-inject Hook DLL (default enabled)
@@ -478,7 +526,7 @@ def main() -> None:
             content = str(result.get("content", ""))
             author = str(result.get("author", ""))
             preview = (content[:120] + "...") if content else "(empty)"
-            print(f"[{now.strftime('%H:%M:%S')}] author={author} content={preview}")
+            safe_console_print(f"[{now.strftime('%H:%M:%S')}] author={author} content={preview}")
 
             retry_same_post_on_fail = os.getenv(
                 "PYWEIXIN_RETRY_SAME_FINGERPRINT_ON_POST_FAIL", "1"

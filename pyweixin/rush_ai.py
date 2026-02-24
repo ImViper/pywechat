@@ -388,7 +388,7 @@ class ArkChatProvider:
 
     Optimized for speed:
     - Uses reasoning_effort="minimal" to disable thinking
-    - Uses detail="low" for fast image processing
+    - Supports configurable image detail (low/high/xhigh/auto)
     - Minimal prompt for direct answers
 
     Install:
@@ -396,7 +396,7 @@ class ArkChatProvider:
     """
 
     api_key: str | None = None
-    model: str = "doubao-seed-2-0-pro-260215"
+    model: str = "doubao-seed-1-8-251228"
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     system_prompt: str = (
         "抢答助手。只输出答案，不解释.\\n"
@@ -409,6 +409,9 @@ class ArkChatProvider:
     temperature: float = 0.7
     top_p: float = 0.9
     timeout_sec: float = 5.0
+    image_detail: str = "auto"
+    image_min_pixels: int = 0
+    image_max_pixels: int = 0
 
     def __post_init__(self) -> None:
         if not self.api_key:
@@ -457,6 +460,23 @@ class ArkChatProvider:
             self.timeout_sec = env_timeout
         except Exception:
             pass
+        try:
+            env_detail = os.getenv("PYWEIXIN_ARK_IMAGE_DETAIL", str(self.image_detail)).strip().lower()
+            if env_detail not in {"", "auto", "low", "high", "xhigh"}:
+                env_detail = "auto"
+            self.image_detail = env_detail or "auto"
+        except Exception:
+            pass
+        try:
+            env_min_pixels = int(os.getenv("PYWEIXIN_ARK_IMAGE_MIN_PIXELS", str(self.image_min_pixels or 0)))
+            self.image_min_pixels = max(0, env_min_pixels)
+        except Exception:
+            pass
+        try:
+            env_max_pixels = int(os.getenv("PYWEIXIN_ARK_IMAGE_MAX_PIXELS", str(self.image_max_pixels or 0)))
+            self.image_max_pixels = max(0, env_max_pixels)
+        except Exception:
+            pass
 
     @staticmethod
     def _image_to_data_url(image_path: str) -> str:
@@ -484,12 +504,19 @@ class ArkChatProvider:
         # 添加图片
         for path in image_paths:
             if os.path.isfile(path):
+                image_obj: dict[str, Any] = {"url": self._image_to_data_url(path)}
+                if self.image_detail in {"low", "high", "xhigh"}:
+                    image_obj["detail"] = self.image_detail
+                if self.image_min_pixels > 0 or self.image_max_pixels > 0:
+                    pixel_limit: dict[str, int] = {}
+                    if self.image_min_pixels > 0:
+                        pixel_limit["min_pixels"] = self.image_min_pixels
+                    if self.image_max_pixels > 0:
+                        pixel_limit["max_pixels"] = self.image_max_pixels
+                    image_obj["image_pixel_limit"] = pixel_limit
                 content.append({
                     "type": "image_url",
-                    "image_url": {
-                        "url": self._image_to_data_url(path),
-                        "detail": "low"
-                    }
+                    "image_url": image_obj
                 })
 
         return [
@@ -533,6 +560,20 @@ class ArkChatProvider:
             raise ValueError("Missing API key. Set ARK_API_KEY or pass api_key.")
 
         payload = self._build_payload(question_text, image_paths)
+        debug_request = os.getenv("PYWEIXIN_ARK_DEBUG_REQUEST", "0").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if debug_request:
+            pixel_limit = {}
+            if self.image_min_pixels > 0:
+                pixel_limit["min_pixels"] = self.image_min_pixels
+            if self.image_max_pixels > 0:
+                pixel_limit["max_pixels"] = self.image_max_pixels
+            print(
+                f"[AI:ark] request model={self.model} images={len(image_paths)} "
+                f"detail={self.image_detail} pixel_limit={pixel_limit or 'default'} "
+                f"timeout={self.timeout_sec:.1f}s"
+            )
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
         req = request.Request(
@@ -548,19 +589,31 @@ class ArkChatProvider:
         try:
             with request.urlopen(req, timeout=self.timeout_sec) as resp:
                 raw = resp.read().decode("utf-8")
-        except Exception:
+        except Exception as exc:
+            print(f"[AI:ark] request failed: {type(exc).__name__}: {exc}")
             return None
 
-        data = json.loads(raw)
+        try:
+            data = json.loads(raw)
+        except Exception as exc:
+            snippet = (raw or "")[:200].replace("\n", "\\n")
+            print(f"[AI:ark] invalid json response: {type(exc).__name__}: {exc}; raw={snippet!r}")
+            return None
+
         choices = data.get("choices") or []
         if not choices:
+            print("[AI:ark] empty choices in response")
             return None
 
         message = choices[0].get("message", {})
         content = message.get("content", "")
         answer = self._normalize_answer(content)
 
-        if not answer or answer.upper() == "SKIP":
+        if not answer:
+            print("[AI:ark] empty normalized answer")
+            return None
+        if answer.upper() == "SKIP":
+            print("[AI:ark] model returned SKIP")
             return None
 
         return AnswerResult(
@@ -581,7 +634,7 @@ class ArkResponsesProvider:
     """
 
     api_key: str | None = None
-    model: str = "doubao-seed-2-0-pro-260215"
+    model: str = "doubao-seed-1-8-251228"
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     system_prompt: str = (
         "你是朋友圈抢答助手。要求：\n"

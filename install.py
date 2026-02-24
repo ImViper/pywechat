@@ -29,6 +29,30 @@ OPTIONAL_PACKAGES = [
     ("volcenginesdkarkruntime", "ARK AI 视觉识别"),
 ]
 
+PIP_COMMON_ARGS = ["--isolated", "--retries", "2", "--timeout", "30"]
+PROXY_ENV_KEYS = [
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "all_proxy",
+]
+PIP_FALLBACK_SOURCES = [
+    ("default", []),
+    (
+        "pypi-trusted",
+        [
+            "-i", "https://pypi.org/simple",
+            "--trusted-host", "pypi.org",
+            "--trusted-host", "files.pythonhosted.org",
+        ],
+    ),
+    (
+        "tuna-mirror",
+        [
+            "-i", "https://pypi.tuna.tsinghua.edu.cn/simple",
+            "--trusted-host", "pypi.tuna.tsinghua.edu.cn",
+        ],
+    ),
+]
+
 
 def ok(msg: str) -> None:
     print(f"  [OK] {msg}")
@@ -40,6 +64,29 @@ def fail(msg: str) -> None:
 
 def warn(msg: str) -> None:
     print(f"  [!]  {msg}")
+
+
+def run_pip_with_fallbacks(args: list[str], step_name: str) -> bool:
+    has_proxy_env = any(os.getenv(k) for k in PROXY_ENV_KEYS)
+    for source_name, source_args in PIP_FALLBACK_SOURCES:
+        if source_name != "default":
+            warn(f"{step_name} 重试: {source_name}")
+        cmd = [str(VENV_PYTHON), "-m", "pip", *args, *PIP_COMMON_ARGS, *source_args]
+        r = subprocess.run(cmd, check=False)
+        if r.returncode == 0:
+            if source_name != "default":
+                ok(f"{step_name} 成功 ({source_name})")
+            return True
+        if has_proxy_env:
+            env = os.environ.copy()
+            for key in PROXY_ENV_KEYS:
+                env.pop(key, None)
+            warn(f"{step_name} 重试: {source_name} (禁用代理变量)")
+            r = subprocess.run(cmd, check=False, env=env)
+            if r.returncode == 0:
+                ok(f"{step_name} 成功 ({source_name}, 无代理)")
+                return True
+    return False
 
 
 def _pause() -> None:
@@ -166,27 +213,25 @@ def run_install() -> None:
         ok(".venv 已存在，跳过")
 
     print("\n[3/5] 更新 pip...")
-    subprocess.run(
-        [str(VENV_PYTHON), "-m", "pip", "install", "--upgrade", "pip"],
-        check=False,
-    )
+    if run_pip_with_fallbacks(["install", "--upgrade", "pip"], "更新 pip"):
+        ok("pip 已更新")
+    else:
+        warn("更新 pip 失败，继续安装依赖（可能仍可成功）")
 
     print("\n[4/5] 安装基础依赖...")
-    r = subprocess.run(
-        [str(VENV_PYTHON), "-m", "pip", "install", "-r", str(REQUIREMENTS)],
-        check=False,
-    )
-    if r.returncode == 0:
+    if run_pip_with_fallbacks(
+        ["install", "-r", str(REQUIREMENTS)],
+        "安装基础依赖",
+    ):
         ok("基础依赖安装完成")
     else:
         warn("部分依赖安装失败，请截屏反馈")
 
     print("\n[5/5] 安装 PaddleOCR (可选)...")
-    r = subprocess.run(
-        [str(VENV_PYTHON), "-m", "pip", "install", "paddleocr", "paddlepaddle"],
-        check=False,
-    )
-    if r.returncode == 0:
+    if run_pip_with_fallbacks(
+        ["install", "paddleocr", "paddlepaddle"],
+        "安装 PaddleOCR",
+    ):
         ok("PaddleOCR 安装完成")
     else:
         warn("PaddleOCR 安装失败，但仍可使用 AI 视觉识别")

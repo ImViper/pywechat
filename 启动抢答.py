@@ -87,6 +87,20 @@ def main() -> None:
         )
     else:
         print(f"[config] runtime config not loaded from {runtime_path}, using fallback defaults")
+    print("[config] effective runtime params:")
+    for key in [
+        "PYWEIXIN_FIRST_ANSWER_MODE",
+        "PYWEIXIN_ARK_MODEL",
+        "PYWEIXIN_ARK_IMAGE_DETAIL",
+        "PYWEIXIN_ARK_TIMEOUT_SEC",
+        "PYWEIXIN_AI_IMAGE_OPTIMIZE",
+        "PYWEIXIN_AI_IMAGE_MAX_SIDE",
+        "PYWEIXIN_AI_IMAGE_JPEG_QUALITY",
+        "PYWEIXIN_DISABLE_OCR",
+        "PYWEIXIN_HOOK_ENABLED",
+        "PYWEIXIN_HOOK_BATCH_MODE",
+    ]:
+        print(f"  {key}={os.getenv(key, '')}")
 
     # User input
     target_author = input("[必填] 请输入要抢答的好友名称: ").strip()
@@ -112,6 +126,10 @@ def main() -> None:
         str(PROJECT_ROOT / "examples" / "run_feed_multi_comment_listener.py"),
         publish_time,
         target_author,
+        "--runtime-config",
+        str(PROJECT_ROOT / "config" / "rush_runtime_env.json"),
+        "--runtime-profile",
+        "startup",
     ]
     if suffix:
         cmd += ["--suffix", suffix]

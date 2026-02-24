@@ -1353,6 +1353,93 @@ def fetch_and_comment_from_moments_feed(
             raise last_error
         raise RuntimeError('cannot locate moments feed list')
 
+    def _extract_images_via_copy_menu(
+        *,
+        run_folder: str,
+        image_count: int,
+        open_candidates: list[tuple[int, int]],
+        right_click_pos: tuple[int, int],
+    ) -> tuple[list[str], bool]:
+        """Extract viewer images by copy menu + clipboard save.
+
+        Returns:
+            (paths, opened)
+            - paths: extracted image paths
+            - opened: whether any candidate entered viewer/copy-menu flow
+        """
+        extracted_paths: list[str] = []
+        opened = False
+        for open_pos in open_candidates:
+            try:
+                mouse.click(coords=open_pos)
+                time.sleep(0.08)
+                current_paths: list[str] = []
+                copy_seen = False
+                for i in range(image_count):
+                    img_path = os.path.join(run_folder, f'{i}.png')
+                    try:
+                        if os.path.isfile(img_path):
+                            os.remove(img_path)
+                    except Exception:
+                        pass
+
+                    try:
+                        mouse.right_click(coords=right_click_pos)
+                    except Exception:
+                        pass
+
+                    copy_menu = moments_window.child_window(**MenuItems.CopyMenuItem)
+                    if not copy_menu.exists(timeout=0.2):
+                        current_paths = []
+                        break
+                    copy_seen = True
+                    opened = True
+
+                    try:
+                        copy_menu.click_input()
+                    except Exception:
+                        try:
+                            mouse.click(coords=right_click_pos)
+                        except Exception:
+                            pass
+
+                    # Give clipboard a short settle time.
+                    time.sleep(0.10)
+                    try:
+                        SystemSettings.save_pasted_image(img_path)
+                    except Exception:
+                        pass
+
+                    if not os.path.isfile(img_path):
+                        current_paths = []
+                        break
+                    try:
+                        if os.path.getsize(img_path) <= 0:
+                            current_paths = []
+                            break
+                    except Exception:
+                        current_paths = []
+                        break
+
+                    current_paths.append(img_path)
+                    if i < image_count - 1:
+                        pyautogui.press('right', interval=0.08)
+                        time.sleep(0.08)
+
+                if current_paths:
+                    extracted_paths = current_paths
+                    break
+                if copy_seen:
+                    # Copy menu was visible but extraction failed; try next open candidate.
+                    continue
+            finally:
+                try:
+                    pyautogui.press('esc')
+                    time.sleep(0.05)
+                except Exception:
+                    pass
+        return extracted_paths, opened
+
     if is_maximize is None:
         is_maximize = GlobalConfig.is_maximize
     if close_weixin is None:
@@ -1716,34 +1803,13 @@ def fetch_and_comment_from_moments_feed(
                     (rect.left + 220, rect.bottom - 120),
                     (rect.mid_point().x, rect.bottom - 100),
                 ]
-                opened = False
                 img_start = time.time()
-                _extracted_paths = []
-                for open_pos in open_candidates:
-                    try:
-                        mouse.click(coords=open_pos)
-                        time.sleep(0.08)
-                        mouse.right_click(coords=viewer_right_click_pos)
-                        copy_menu = moments_window.child_window(**MenuItems.CopyMenuItem)
-                        if copy_menu.exists(timeout=0.15):
-                            pyautogui.press('esc')
-                            time.sleep(0.03)
-                            first_img_path = os.path.join(run_folder, '0.png')
-                            moments_window.capture_as_image().save(first_img_path)
-                            if os.path.isfile(first_img_path):
-                                _extracted_paths.append(first_img_path)
-                                opened = True
-                                for i in range(1, image_count):
-                                    pyautogui.press('right', interval=0.08)
-                                    time.sleep(0.08)
-                                    img_path = os.path.join(run_folder, f'{i}.png')
-                                    moments_window.capture_as_image().save(img_path)
-                                    if os.path.isfile(img_path):
-                                        _extracted_paths.append(img_path)
-                            break
-                    finally:
-                        pyautogui.press('esc')
-                        time.sleep(0.05)
+                _extracted_paths, opened = _extract_images_via_copy_menu(
+                    run_folder=run_folder,
+                    image_count=image_count,
+                    open_candidates=open_candidates,
+                    right_click_pos=viewer_right_click_pos,
+                )
                 img_elapsed = int((time.time() - img_start) * 1000)
                 result['image_paths'] = _extracted_paths
                 print(f'[debug:img] extracted {len(_extracted_paths)}/{image_count} images ({img_elapsed}ms)')
@@ -1954,29 +2020,13 @@ def fetch_and_comment_from_moments_feed(
                             (_d_rect.left + 220, _d_rect.bottom - 120),
                             (_d_rect.mid_point().x, _d_rect.bottom - 100),
                         ]
-                        _d_paths = []
                         img_start = time.time()
-                        for _d_pos in _d_candidates:
-                            try:
-                                mouse.click(coords=_d_pos)
-                                time.sleep(0.08)
-                                mouse.right_click(coords=_d_rclick)
-                                copy_menu = moments_window.child_window(**MenuItems.CopyMenuItem)
-                                if copy_menu.exists(timeout=0.15):
-                                    pyautogui.press('esc')
-                                    time.sleep(0.03)
-                                    for _di in range(image_count):
-                                        if _di > 0:
-                                            pyautogui.press('right', interval=0.08)
-                                            time.sleep(0.08)
-                                        _dp = os.path.join(run_folder, f'{_di}.png')
-                                        moments_window.capture_as_image().save(_dp)
-                                        if os.path.isfile(_dp):
-                                            _d_paths.append(_dp)
-                                    break
-                            finally:
-                                pyautogui.press('esc')
-                                time.sleep(0.05)
+                        _d_paths, _ = _extract_images_via_copy_menu(
+                            run_folder=run_folder,
+                            image_count=image_count,
+                            open_candidates=_d_candidates,
+                            right_click_pos=_d_rclick,
+                        )
                         _d_ms = int((time.time() - img_start) * 1000)
                         if not _d_paths:
                             try:
