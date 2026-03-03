@@ -68,11 +68,33 @@ def main() -> None:
         hour, minute = map(int, publish_time_str.split(":"))
         today = datetime.now().date()
         publish_dt = datetime.combine(today, datetime.min.time()).replace(hour=hour, minute=minute)
-        start_dt = publish_dt - timedelta(minutes=2)
-        end_dt = publish_dt + timedelta(minutes=5)
+        try:
+            monitor_start_offset_minutes = int(
+                os.getenv("PYWEIXIN_MONITOR_WINDOW_START_OFFSET_MINUTES", "-1")
+            )
+        except Exception:
+            monitor_start_offset_minutes = -1
+        try:
+            monitor_end_offset_minutes = int(
+                os.getenv("PYWEIXIN_MONITOR_WINDOW_END_OFFSET_MINUTES", "5")
+            )
+        except Exception:
+            monitor_end_offset_minutes = 5
+        if monitor_end_offset_minutes <= monitor_start_offset_minutes:
+            monitor_end_offset_minutes = monitor_start_offset_minutes + 1
+        start_dt = publish_dt + timedelta(minutes=monitor_start_offset_minutes)
+        end_dt = publish_dt + timedelta(minutes=monitor_end_offset_minutes)
     except Exception:
         print(f"Error: invalid time format '{publish_time_str}', expected HH:MM")
         return
+    try:
+        publish_time_tolerance_minutes = int(
+            os.getenv("PYWEIXIN_PUBLISH_TIME_TOLERANCE_MINUTES", "8")
+        )
+    except Exception:
+        publish_time_tolerance_minutes = 8
+    if publish_time_tolerance_minutes < 1:
+        publish_time_tolerance_minutes = 1
 
     api_key = load_api_key()
     if not api_key:
@@ -133,6 +155,11 @@ def main() -> None:
     print(f"Publish time:  {publish_dt.strftime('%Y-%m-%d %H:%M')}")
     print(f"Monitor start: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Monitor end:   {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(
+        f"Monitor win:   {monitor_start_offset_minutes:+d}min.."
+        f"{monitor_end_offset_minutes:+d}min"
+    )
+    print(f"Publish tol:   +/-{publish_time_tolerance_minutes}min")
     print(f"Poll interval: {poll_interval:.2f}s")
     print(f"Output dir:    {output_dir}")
     if answer_suffix:
@@ -233,6 +260,8 @@ def main() -> None:
                 last_fingerprint=last_fingerprint,
                 refresh_first=True,
                 moments_window=moments_window,
+                expected_publish_dt=publish_dt,
+                publish_time_tolerance_minutes=publish_time_tolerance_minutes,
             )
 
             if not result.get("success"):

@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from pyweixin.runtime_env import apply_runtime_env, load_and_apply_runtime_env
@@ -109,11 +110,12 @@ def main() -> None:
         _pause()
         return
 
-    publish_time = input("[必填] 请输入预计的发圈时间 (如 19:15): ").strip()
+    default_publish_time = datetime.now().strftime("%H:%M")
+    publish_time = input(
+        f"[可选] 请输入预计的发圈时间 (如 19:15，默认当前时间 {default_publish_time}): "
+    ).strip()
     if not publish_time:
-        print("时间不能为空")
-        _pause()
-        return
+        publish_time = default_publish_time
 
     print()
     print("以下选填，不填直接回车跳过")

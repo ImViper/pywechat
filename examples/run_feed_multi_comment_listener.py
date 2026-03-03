@@ -215,11 +215,33 @@ def main() -> None:
         publish_dt = datetime.combine(today, datetime.min.time()).replace(
             hour=hour, minute=minute
         )
-        start_dt = publish_dt - timedelta(minutes=2)
-        end_dt = publish_dt + timedelta(minutes=5)
+        try:
+            monitor_start_offset_minutes = int(
+                os.getenv("PYWEIXIN_MONITOR_WINDOW_START_OFFSET_MINUTES", "-1")
+            )
+        except Exception:
+            monitor_start_offset_minutes = -1
+        try:
+            monitor_end_offset_minutes = int(
+                os.getenv("PYWEIXIN_MONITOR_WINDOW_END_OFFSET_MINUTES", "5")
+            )
+        except Exception:
+            monitor_end_offset_minutes = 5
+        if monitor_end_offset_minutes <= monitor_start_offset_minutes:
+            monitor_end_offset_minutes = monitor_start_offset_minutes + 1
+        start_dt = publish_dt + timedelta(minutes=monitor_start_offset_minutes)
+        end_dt = publish_dt + timedelta(minutes=monitor_end_offset_minutes)
     except Exception:
         print(f"Error: invalid time format '{publish_time_str}', expected HH:MM")
         return
+    try:
+        publish_time_tolerance_minutes = int(
+            os.getenv("PYWEIXIN_PUBLISH_TIME_TOLERANCE_MINUTES", "8")
+        )
+    except Exception:
+        publish_time_tolerance_minutes = 8
+    if publish_time_tolerance_minutes < 1:
+        publish_time_tolerance_minutes = 1
 
     # Load API key
     api_key = load_api_key()
@@ -401,6 +423,11 @@ def main() -> None:
     print(f"Publish time:  {publish_dt.strftime('%Y-%m-%d %H:%M')}")
     print(f"Monitor start: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Monitor end:   {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(
+        f"Monitor win:   {monitor_start_offset_minutes:+d}min.."
+        f"{monitor_end_offset_minutes:+d}min"
+    )
+    print(f"Publish tol:   +/-{publish_time_tolerance_minutes}min")
     print(f"Poll interval: {poll_interval:.2f}s")
     print(f"Max comments:  {max_comments}")
     print(f"First mode:    {first_answer_mode}")
@@ -428,7 +455,7 @@ def main() -> None:
         "1", "true", "yes"
     }
     force_reset_last_fingerprint = os.getenv(
-        "PYWEIXIN_FORCE_RESET_LAST_FINGERPRINT", "1"
+        "PYWEIXIN_FORCE_RESET_LAST_FINGERPRINT", "0"
     ).strip().lower() in {"1", "true", "yes"}
 
     if already_commented:
@@ -454,6 +481,9 @@ def main() -> None:
     last_fingerprint = state.get("last_fingerprint", "")
     commented_this_run = False
     moments_window = None
+    comment_send_attempts = 0
+    max_comment_sends = int(os.getenv("PYWEIXIN_COMMENT_MAX_SENDS", "3"))
+    cached_ai_answer = None  # 缓存首次 AI 答案，重试时直接复用
 
     try:
         while True:
@@ -471,6 +501,11 @@ def main() -> None:
 
             if already_commented:
                 print(f"[{now.strftime('%H:%M:%S')}] already commented, exit")
+                break
+
+            # 已达到最大发送次数，退出
+            if comment_send_attempts >= max_comment_sends and cached_ai_answer is not None:
+                print(f"[{now.strftime('%H:%M:%S')}] reached max comment sends ({max_comment_sends}), done")
                 break
 
             loops += 1
@@ -495,18 +530,28 @@ def main() -> None:
                     time.sleep(poll_interval)
                     continue
 
+            # 重试时用缓存答案替换 ai_callback，避免重复调用 AI
+            if cached_ai_answer is not None:
+                replay_answer = cached_ai_answer
+                effective_callback = lambda content, images, _a=replay_answer: _a
+                print(f"[{now.strftime('%H:%M:%S')}] retry send #{comment_send_attempts + 1}/{max_comment_sends}, reusing cached answer")
+            else:
+                effective_callback = ai_callback
+
             # Fetch and comment
             result = fetch_and_comment_from_moments_feed(
                 target_author=target_author,
-                ai_callback=ai_callback,
+                ai_callback=effective_callback,
                 target_folder=output_dir,
                 is_maximize=True,
                 close_weixin=False,
                 include_keywords=include_keywords,
                 exclude_keywords=exclude_keywords,
                 last_fingerprint=last_fingerprint,
-                refresh_first=True,
+                refresh_first=(cached_ai_answer is None),
                 moments_window=moments_window,
+                expected_publish_dt=publish_dt,
+                publish_time_tolerance_minutes=publish_time_tolerance_minutes,
             )
 
             # Handle result
@@ -562,7 +607,12 @@ def main() -> None:
                     time.sleep(poll_interval)
                     continue
 
-                # Success
+                # 记录本次发送
+                comment_send_attempts += 1
+                if cached_ai_answer is None:
+                    cached_ai_answer = result.get("ai_answer")
+
+                # 更新状态
                 last_fingerprint = fingerprint
                 state["last_fingerprint"] = fingerprint
                 state["commented"] = True
@@ -574,10 +624,16 @@ def main() -> None:
 
                 print("=" * 60)
                 if result.get("comment_posted"):
-                    print(f"Posted comments: {result.get('ai_answer')}")
+                    print(f"[send {comment_send_attempts}/{max_comment_sends}] Posted: {result.get('ai_answer')}")
                 else:
-                    print(f"Attempted comments: {result.get('ai_answer')} (status unknown)")
+                    print(f"[send {comment_send_attempts}/{max_comment_sends}] Attempted: {result.get('ai_answer')} (status unknown)")
                 print("=" * 60)
+
+                # 未达最大次数，保持窗口打开，直接重新定位帖子再发
+                if comment_send_attempts < max_comment_sends:
+                    print(f"[{now.strftime('%H:%M:%S')}] will retry send ({comment_send_attempts}/{max_comment_sends})...")
+                    continue
+
                 break
 
             # No new post

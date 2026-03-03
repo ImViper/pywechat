@@ -8,6 +8,7 @@ import time
 import json
 import hashlib
 import threading
+from datetime import datetime, timedelta
 import pyautogui
 import win32gui
 import win32con
@@ -296,14 +297,53 @@ def _build_item_key(listitem: ListItemWrapper) -> tuple:
     return ('item', digest.hexdigest())
 
 
+def _parse_relative_post_age_minutes(post_time: str):
+    """Parse relative publish time text to age in minutes.
+
+    Returns:
+      - int minutes for relative timestamps (e.g. 3分钟前 / 2小时前 / 昨天 / 5天前)
+      - None when format is unknown or empty.
+    """
+    if not post_time:
+        return None
+    s = str(post_time).strip()
+    if not s:
+        return None
+    if s == '刚刚':
+        return 0
+    m = re.match(r'^(\d+)分钟前$', s)
+    if m:
+        return int(m.group(1))
+    m = re.match(r'^(\d+)小时前$', s)
+    if m:
+        return int(m.group(1)) * 60
+    m = re.match(r'^(\d+)天前$', s)
+    if m:
+        return int(m.group(1)) * 24 * 60
+    if s == '昨天':
+        return 24 * 60
+    return None
+
+
+def _normalize_post_time_for_fingerprint(post_time: str) -> str:
+    """Normalize publish time to reduce fingerprint churn on relative timestamps."""
+    age_minutes = _parse_relative_post_age_minutes(post_time)
+    if age_minutes is not None:
+        # Relative timestamps drift over time (e.g. 1分钟前 -> 2分钟前).
+        # For dedup fingerprints we collapse them to a stable token.
+        return '__RELATIVE_TIME__'
+    return (post_time or '')
+
+
 def _build_post_fingerprint(content: str, post_time: str, photo_num: int, video_num: int, item_key) -> str:
     """Build fingerprint for post deduplication."""
     hasher = hashlib.sha1()
     hasher.update((content or '').encode('utf-8', errors='ignore'))
-    hasher.update((post_time or '').encode('utf-8', errors='ignore'))
+    normalized_post_time = _normalize_post_time_for_fingerprint(post_time)
+    hasher.update(normalized_post_time.encode('utf-8', errors='ignore'))
     hasher.update(str(photo_num).encode('utf-8'))
     hasher.update(str(video_num).encode('utf-8'))
-    if not (content or post_time):
+    if not (content or normalized_post_time):
         hasher.update(str(item_key).encode('utf-8', errors='ignore'))
     return hasher.hexdigest()
 
@@ -428,23 +468,17 @@ def paste_and_send_comment(moments_window, text: str, anchor_mode: str = 'list',
                 clicked_by_anchor = True
                 print('[debug:paste_send] clicked send by anchor')
             else:
-                print('[debug:paste_send] invalid anchor rect, fallback to enter')
+                print('[debug:paste_send] invalid anchor rect, send aborted (no enter fallback)')
         except Exception as e:
             clicked_by_anchor = False
             print(f'[debug:paste_send] anchor click failed: {e}')
     if not clicked_by_anchor:
-        pyautogui.press('enter')
-        print('[debug:paste_send] pressed enter to send')
+        print('[debug:paste_send] anchor send unavailable, returning False (enter disabled)')
+        return False
     closed = wait_comment_editor_state(moments_window, opened=False, timeout=0.4, poll=0.05)
     print(f'[debug:paste_send] editor closed after send={closed}')
     if closed:
         return True
-    if clicked_by_anchor:
-        pyautogui.press('enter')
-        closed2 = wait_comment_editor_state(moments_window, opened=False, timeout=0.3, poll=0.05)
-        print(f'[debug:paste_send] fallback enter, editor closed={closed2}')
-        if closed2:
-            return True
     print('[debug:paste_send] returning False')
     return False
 
@@ -888,7 +922,7 @@ def like_posts(recent: Literal['Today', 'Yesterday', 'Week', 'Month'] = 'Today',
                     y_offset=_SNS_SEND_LIST_Y_OFFSET
                 )
             else:
-                pyautogui.press('enter')
+                print('[debug:comment] comment_listitem missing, skip send (enter disabled)')
 
     if is_maximize is None:
         is_maximize = GlobalConfig.is_maximize
@@ -1004,7 +1038,7 @@ def like_friend_posts(friend: str, number: int, callback: Callable[[str], str] =
                     y_offset=_SNS_SEND_LIST_Y_OFFSET
                 )
             else:
-                pyautogui.press('enter')
+                print('[debug:comment] comment_listitem missing, skip send (enter disabled)')
 
     if is_maximize is None:
         is_maximize = GlobalConfig.is_maximize
@@ -1144,11 +1178,13 @@ def fetch_and_comment_friend_moment(
         result['image_count'] = image_count
         result['publish_time'] = publish_time
 
-        hasher = hashlib.sha1()
-        hasher.update(content.encode('utf-8', errors='ignore'))
-        hasher.update(publish_time.encode('utf-8', errors='ignore'))
-        hasher.update(str(image_count).encode('utf-8'))
-        result['fingerprint'] = hasher.hexdigest()
+        result['fingerprint'] = _build_post_fingerprint(
+            content=content,
+            post_time=publish_time,
+            photo_num=image_count,
+            video_num=0,
+            item_key=None,
+        )
 
         if last_fingerprint and result['fingerprint'] == last_fingerprint:
             result['success'] = True
@@ -1261,7 +1297,9 @@ def fetch_and_comment_from_moments_feed(
     exclude_keywords: list = None,
     last_fingerprint: str = None,
     refresh_first: bool = True,
-    moments_window: WindowSpecification = None
+    moments_window: WindowSpecification = None,
+    expected_publish_dt: datetime = None,
+    publish_time_tolerance_minutes: int = 8,
 ) -> dict:
     """Read first valid post in global feed, infer and comment in list mode."""
     def refresh_moments_window(current_window, retries: int = 4, wait: float = 0.12):
@@ -1465,6 +1503,22 @@ def fetch_and_comment_from_moments_feed(
     }
 
     created_window = False
+    now_for_publish_eval = datetime.now()
+    try:
+        publish_time_tolerance_minutes = int(publish_time_tolerance_minutes)
+    except Exception:
+        publish_time_tolerance_minutes = 8
+    if publish_time_tolerance_minutes < 1:
+        publish_time_tolerance_minutes = 1
+    skip_stale_posts = os.getenv("PYWEIXIN_SKIP_STALE_POSTS", "1").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    try:
+        max_post_age_minutes = int(os.getenv("PYWEIXIN_MAX_POST_AGE_MINUTES", "30"))
+    except Exception:
+        max_post_age_minutes = 30
+    if max_post_age_minutes < 1:
+        max_post_age_minutes = 1
 
     def parse_feed_listitem(listitem: ListItemWrapper):
         sns_timestamp_pattern = _regex_patterns.Sns_Timestamp_pattern
@@ -1480,7 +1534,11 @@ def fetch_and_comment_from_moments_feed(
                 image_count = int(match.group(1))
             content = re.sub(rf'\s(包含\d+张图片\s{post_time}|视频\s{post_time}|{post_time})', '', text).strip()
         else:
-            content = text
+            if '刚刚' in text:
+                post_time = '刚刚'
+                content = re.sub(r'\s刚刚', '', text).strip()
+            else:
+                content = text
         author = ''
         body = content
         if content:
@@ -1538,11 +1596,14 @@ def fetch_and_comment_from_moments_feed(
             if selected and selected[0].class_name() not in not_contents:
                 candidate = selected[0]
                 c_author, c_body, c_content, c_image_count, c_publish_time = parse_feed_listitem(candidate)
-                c_hasher = hashlib.sha1()
-                c_hasher.update(c_content.encode('utf-8', errors='ignore'))
-                c_hasher.update(c_publish_time.encode('utf-8', errors='ignore'))
-                c_hasher.update(str(c_image_count).encode('utf-8'))
-                c_fingerprint = c_hasher.hexdigest()
+                c_item_key = _build_item_key(candidate)
+                c_fingerprint = _build_post_fingerprint(
+                    content=c_content,
+                    post_time=c_publish_time,
+                    photo_num=c_image_count,
+                    video_num=0,
+                    item_key=c_item_key,
+                )
                 if fallback_parsed is None:
                     fallback_parsed = (
                         c_author, c_body, c_content, c_image_count, c_publish_time
@@ -1553,8 +1614,21 @@ def fetch_and_comment_from_moments_feed(
                     author_hit = (c_author == target_author) or (target_author in c_author)
                     if not author_hit:
                         continue
-                if last_fingerprint and c_fingerprint == last_fingerprint:
+                if expected_publish_dt is None and last_fingerprint and c_fingerprint == last_fingerprint:
                     continue
+                age_minutes = _parse_relative_post_age_minutes(c_publish_time)
+                if expected_publish_dt is not None:
+                    if age_minutes is None:
+                        continue
+                    inferred_publish_dt = now_for_publish_eval - timedelta(minutes=age_minutes)
+                    delta_minutes = abs(
+                        (inferred_publish_dt - expected_publish_dt).total_seconds()
+                    ) / 60.0
+                    if delta_minutes > publish_time_tolerance_minutes:
+                        continue
+                elif skip_stale_posts:
+                    if age_minutes is not None and age_minutes > max_post_age_minutes:
+                        continue
 
                 c_text_for_filter = c_body if c_body else c_content
                 if include_keywords and not any(kw in c_text_for_filter for kw in include_keywords):
@@ -1582,11 +1656,14 @@ def fetch_and_comment_from_moments_feed(
 
         if selected_parsed is None:
             author, body, content, image_count, publish_time = parse_feed_listitem(selected_item)
-            hasher = hashlib.sha1()
-            hasher.update(content.encode('utf-8', errors='ignore'))
-            hasher.update(publish_time.encode('utf-8', errors='ignore'))
-            hasher.update(str(image_count).encode('utf-8'))
-            fingerprint = hasher.hexdigest()
+            item_key = _build_item_key(selected_item)
+            fingerprint = _build_post_fingerprint(
+                content=content,
+                post_time=publish_time,
+                photo_num=image_count,
+                video_num=0,
+                item_key=item_key,
+            )
         else:
             author, body, content, image_count, publish_time, fingerprint = selected_parsed
 
