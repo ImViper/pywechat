@@ -1611,32 +1611,44 @@ def fetch_and_comment_from_moments_feed(
                     )
                     fallback_fingerprint = c_fingerprint
 
+                _preview = (c_content[:60] + '..') if len(c_content) > 60 else c_content
+                print(f'[debug:select] candidate author={c_author!r} time={c_publish_time!r} img={c_image_count} fp={c_fingerprint[:8]} content={_preview!r}')
+
                 if target_author:
                     author_hit = (c_author == target_author) or (target_author in c_author)
                     if not author_hit:
+                        print(f'[debug:select]   SKIP: author mismatch (want {target_author!r})')
                         continue
                 if expected_publish_dt is None and last_fingerprint and c_fingerprint == last_fingerprint:
+                    print(f'[debug:select]   SKIP: same fingerprint as last')
                     continue
                 age_minutes = _parse_relative_post_age_minutes(c_publish_time)
                 if expected_publish_dt is not None:
                     if age_minutes is None:
+                        print(f'[debug:select]   SKIP: cannot parse age from {c_publish_time!r}')
                         continue
                     inferred_publish_dt = now_for_publish_eval - timedelta(minutes=age_minutes)
                     delta_minutes = abs(
                         (inferred_publish_dt - expected_publish_dt).total_seconds()
                     ) / 60.0
+                    print(f'[debug:select]   age={age_minutes}min, inferred={inferred_publish_dt.strftime("%H:%M")}, expected={expected_publish_dt.strftime("%H:%M")}, delta={delta_minutes:.1f}min, tol={publish_time_tolerance_minutes}min')
                     if delta_minutes > publish_time_tolerance_minutes:
+                        print(f'[debug:select]   SKIP: delta {delta_minutes:.1f} > tolerance {publish_time_tolerance_minutes}')
                         continue
                 elif skip_stale_posts:
                     if age_minutes is not None and age_minutes > max_post_age_minutes:
+                        print(f'[debug:select]   SKIP: stale post ({age_minutes}min > {max_post_age_minutes}min)')
                         continue
 
                 c_text_for_filter = c_body if c_body else c_content
                 if include_keywords and not any(kw in c_text_for_filter for kw in include_keywords):
+                    print(f'[debug:select]   SKIP: no include keyword match')
                     continue
                 if exclude_keywords and any(kw in c_text_for_filter for kw in exclude_keywords):
+                    print(f'[debug:select]   SKIP: exclude keyword matched')
                     continue
 
+                print(f'[debug:select]   ACCEPTED')
                 selected_item = candidate
                 selected_parsed = (
                     c_author, c_body, c_content, c_image_count, c_publish_time, c_fingerprint
