@@ -530,18 +530,14 @@ def main() -> None:
                     time.sleep(poll_interval)
                     continue
 
-            # 重试时用缓存答案替换 ai_callback，避免重复调用 AI
+            # 重试时传 override_answer，跳过图片提取和 AI 调用
             if cached_ai_answer is not None:
-                replay_answer = cached_ai_answer
-                effective_callback = lambda content, images, _a=replay_answer: _a
                 print(f"[{now.strftime('%H:%M:%S')}] retry send #{comment_send_attempts + 1}/{max_comment_sends}, reusing cached answer")
-            else:
-                effective_callback = ai_callback
 
             # Fetch and comment
             result = fetch_and_comment_from_moments_feed(
                 target_author=target_author,
-                ai_callback=effective_callback,
+                ai_callback=ai_callback,
                 target_folder=output_dir,
                 is_maximize=True,
                 close_weixin=False,
@@ -552,6 +548,7 @@ def main() -> None:
                 moments_window=moments_window,
                 expected_publish_dt=publish_dt,
                 publish_time_tolerance_minutes=publish_time_tolerance_minutes,
+                override_answer=cached_ai_answer,
             )
 
             # Handle result

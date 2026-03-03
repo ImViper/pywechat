@@ -1300,6 +1300,7 @@ def fetch_and_comment_from_moments_feed(
     moments_window: WindowSpecification = None,
     expected_publish_dt: datetime = None,
     publish_time_tolerance_minutes: int = 8,
+    override_answer=None,
 ) -> dict:
     """Read first valid post in global feed, infer and comment in list mode."""
     def refresh_moments_window(current_window, retries: int = 4, wait: float = 0.12):
@@ -1681,7 +1682,62 @@ def fetch_and_comment_from_moments_feed(
 
         result['success'] = True
 
-        # Hook 路径（默认启用，无需环境变量）
+        # override_answer 短路：跳过图片提取和 AI，直接定位帖子发评论
+        if override_answer is not None:
+            print(f'[debug:override] skipping image/AI, posting cached answer directly')
+            answer_list = []
+            if isinstance(override_answer, list):
+                answer_list = [str(a).strip() for a in override_answer if a and str(a).strip()]
+            elif isinstance(override_answer, str) and override_answer.strip():
+                answer_list = [override_answer.strip()]
+            if not answer_list:
+                result['ai_answer'] = override_answer
+                return result
+            result['ai_answer'] = override_answer
+
+            time.sleep(0.15)
+            moments_list = reacquire_feed_list(retries=10, wait=0.15)
+            try:
+                moments_list.type_keys('{HOME}')
+            except Exception:
+                pyautogui.press('home')
+            time.sleep(0.1)
+
+            _selected_item = None
+            for nav_i in range(15):
+                try:
+                    moments_list.type_keys('{DOWN}', pause=0.05)
+                except Exception:
+                    pyautogui.press('down')
+                try:
+                    candidates = [li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
+                except Exception:
+                    moments_list = reacquire_feed_list(retries=4, wait=0.1)
+                    continue
+                if candidates and candidates[0].class_name() not in ('TimelineCommentCell', 'TimelineSnsAdCell'):
+                    _selected_item = candidates[0]
+                    break
+
+            if _selected_item is None:
+                result['error'] = 'cannot re-acquire post for override comment'
+                return result
+
+            _comment_listitem = resolve_feed_comment_anchor(moments_list, _selected_item)
+            _win_rect = moments_window.rectangle()
+            _center_point = (_win_rect.mid_point().x, _win_rect.mid_point().y)
+
+            result['comment_attempted'] = True
+            print(f'[debug:override] calling comment_flow with answers={answer_list}')
+            posted = comment_flow(
+                moments_window, _selected_item, answer_list,
+                anchor_mode='list', anchor_source=_comment_listitem,
+                use_offset_fix=False, clear_first=False,
+                pre_move_coords=_center_point
+            )
+            result['comment_posted'] = posted
+            if not posted and not result.get('error'):
+                result['error'] = 'override comment flow finished but send was not verified'
+            return result
         # Force enable Hook if not explicitly disabled.
         if os.environ.get('PYWEIXIN_HOOK_ENABLED') is None:
             os.environ['PYWEIXIN_HOOK_ENABLED'] = '1'
