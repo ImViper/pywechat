@@ -89,10 +89,10 @@ def main() -> None:
         return
     try:
         publish_time_tolerance_minutes = int(
-            os.getenv("PYWEIXIN_PUBLISH_TIME_TOLERANCE_MINUTES", "8")
+            os.getenv("PYWEIXIN_PUBLISH_TIME_TOLERANCE_MINUTES", "2")
         )
     except Exception:
-        publish_time_tolerance_minutes = 8
+        publish_time_tolerance_minutes = 2
     if publish_time_tolerance_minutes < 1:
         publish_time_tolerance_minutes = 1
 

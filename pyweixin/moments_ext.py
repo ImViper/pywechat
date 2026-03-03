@@ -1299,7 +1299,7 @@ def fetch_and_comment_from_moments_feed(
     refresh_first: bool = True,
     moments_window: WindowSpecification = None,
     expected_publish_dt: datetime = None,
-    publish_time_tolerance_minutes: int = 8,
+    publish_time_tolerance_minutes: int = 2,
     override_answer=None,
 ) -> dict:
     """Read first valid post in global feed, infer and comment in list mode."""
@@ -1508,7 +1508,7 @@ def fetch_and_comment_from_moments_feed(
     try:
         publish_time_tolerance_minutes = int(publish_time_tolerance_minutes)
     except Exception:
-        publish_time_tolerance_minutes = 8
+        publish_time_tolerance_minutes = 2
     if publish_time_tolerance_minutes < 1:
         publish_time_tolerance_minutes = 1
     skip_stale_posts = os.getenv("PYWEIXIN_SKIP_STALE_POSTS", "1").strip().lower() in {
