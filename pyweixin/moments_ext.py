@@ -1695,7 +1695,6 @@ def fetch_and_comment_from_moments_feed(
                 return result
             result['ai_answer'] = override_answer
 
-            time.sleep(0.15)
             moments_list = reacquire_feed_list(retries=10, wait=0.15)
             try:
                 moments_list.type_keys('{HOME}')
@@ -1714,12 +1713,24 @@ def fetch_and_comment_from_moments_feed(
                 except Exception:
                     moments_list = reacquire_feed_list(retries=4, wait=0.1)
                     continue
-                if candidates and candidates[0].class_name() not in ('TimelineCommentCell', 'TimelineSnsAdCell'):
-                    _selected_item = candidates[0]
+                if not candidates or candidates[0].class_name() in ('TimelineCommentCell', 'TimelineSnsAdCell'):
+                    continue
+                _cand = candidates[0]
+                _c_author, _c_body, _c_content, _c_img, _c_time = parse_feed_listitem(_cand)
+                _c_fp = _build_post_fingerprint(
+                    content=_c_content, post_time=_c_time,
+                    photo_num=_c_img, video_num=0,
+                    item_key=_build_item_key(_cand),
+                )
+                if _c_fp == fingerprint:
+                    _selected_item = _cand
+                    print(f'[debug:override] matched target post by fingerprint at nav #{nav_i + 1}')
                     break
+                else:
+                    print(f'[debug:override] nav #{nav_i + 1} fingerprint mismatch, skip')
 
             if _selected_item is None:
-                result['error'] = 'cannot re-acquire post for override comment'
+                result['error'] = 'cannot re-acquire target post for override comment (fingerprint mismatch)'
                 return result
 
             _comment_listitem = resolve_feed_comment_anchor(moments_list, _selected_item)
