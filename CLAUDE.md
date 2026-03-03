@@ -70,24 +70,37 @@ from pyweixin.your_ext import your_function
 ## 项目结构
 
 ```
-pyweixin/
-  WeChatAuto.py          # upstream（不动）
-  WeChatTools.py         # upstream（仅 bug fix）
-  Uielements.py          # upstream（可追加新 UI 元素）
-  __init__.py            # 导出入口（追加 viper 扩展导入）
-  moments_ext.py         # viper: 朋友圈扩展
-  rush_engine.py         # viper: 抢答引擎
-  rush_ai.py             # viper: AI/OCR provider
-  rush_callback.py       # viper: 流式回调
-  rush_types.py          # viper: 类型定义
-  rush_state.py          # viper: 状态持久化
-  moments_question_miner.py  # viper: 题目挖掘
-config/                  # 配置文件（.local_secrets.json 已 gitignore）
-examples/                # 运行入口脚本
-tests/                   # 测试
-docs/                    # 文档
-deprecated/              # 废弃脚本
-local_workspace/         # 本地工作区（已 gitignore，不入库）
+启动抢答.py                # 主入口
+config/                    # 配置文件（.local_secrets.json 已 gitignore）
+pyweixin/                  # 核心代码
+  WeChatAuto.py            #   upstream（不动）
+  WeChatTools.py           #   upstream（仅 bug fix）
+  Uielements.py            #   upstream（可追加新 UI 元素）
+  __init__.py              #   导出入口（追加 viper 扩展导入）
+  moments_ext.py           #   viper: 朋友圈扩展
+  rush_engine.py           #   viper: 抢答引擎
+  rush_ai.py               #   viper: AI/OCR provider
+  rush_callback.py         #   viper: 流式回调
+  rush_types.py            #   viper: 类型定义
+  rush_state.py            #   viper: 状态持久化
+  moments_question_miner.py #  viper: 题目挖掘
+examples/                  # 活跃运行脚本（3 个）
+hook/
+  src/                     # Hook DLL 源码
+  CMakeLists.txt
+tests/                     # 测试
+docs/                      # 活跃文档（7 个）
+archived/                  # 历史文件统一归档
+  examples_route_a/        #   Route A HTTP 逆向脚本
+  examples_misc/           #   其余旧 examples
+  scripts/                 #   phase0 验证脚本
+  docs/                    #   旧文档
+  deprecated/              #   废弃脚本
+  hook_tools/              #   逆向工程辅助工具
+  pywechat_upstream/       #   upstream 原始包副本
+  inspcet/                 #   二进制检查工具
+  pics/                    #   文档截图
+local_workspace/           # 本地工作区（已 gitignore，不入库）
 ```
 
 ## Git 分支策略
