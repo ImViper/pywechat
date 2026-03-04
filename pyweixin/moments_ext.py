@@ -1584,76 +1584,82 @@ def fetch_and_comment_from_moments_feed(
         selected_parsed = None
         fallback_parsed = None
         fallback_fingerprint = ''
-        for _ in range(15):
-            try:
-                moments_list.type_keys('{DOWN}', pause=0.05)
-            except Exception:
-                pyautogui.press('down')
-            try:
-                selected = [li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
-            except Exception:
-                moments_list = reacquire_feed_list(retries=4, wait=0.1)
-                selected = [li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
-            if selected and selected[0].class_name() not in not_contents:
-                candidate = selected[0]
-                c_author, c_body, c_content, c_image_count, c_publish_time = parse_feed_listitem(candidate)
-                c_item_key = _build_item_key(candidate)
-                c_fingerprint = _build_post_fingerprint(
-                    content=c_content,
-                    post_time=c_publish_time,
-                    photo_num=c_image_count,
-                    video_num=0,
-                    item_key=c_item_key,
+        try:
+            all_items = moments_list.children(control_type='ListItem')
+        except Exception:
+            moments_list = reacquire_feed_list(retries=4, wait=0.1)
+            all_items = moments_list.children(control_type='ListItem')
+        _post_idx = 0
+        _skip_cls_count = 0
+        print(f'[debug:select] feed list has {len(all_items)} total items')
+        for candidate in all_items:
+            if candidate.class_name() in not_contents:
+                _skip_cls_count += 1
+                continue
+            _post_idx += 1
+            c_author, c_body, c_content, c_image_count, c_publish_time = parse_feed_listitem(candidate)
+            c_item_key = _build_item_key(candidate)
+            c_fingerprint = _build_post_fingerprint(
+                content=c_content,
+                post_time=c_publish_time,
+                photo_num=c_image_count,
+                video_num=0,
+                item_key=c_item_key,
+            )
+            if fallback_parsed is None:
+                fallback_parsed = (
+                    c_author, c_body, c_content, c_image_count, c_publish_time
                 )
-                if fallback_parsed is None:
-                    fallback_parsed = (
-                        c_author, c_body, c_content, c_image_count, c_publish_time
-                    )
-                    fallback_fingerprint = c_fingerprint
+                fallback_fingerprint = c_fingerprint
 
-                _preview = (c_content[:60] + '..') if len(c_content) > 60 else c_content
-                print(f'[debug:select] candidate author={c_author!r} time={c_publish_time!r} img={c_image_count} fp={c_fingerprint[:8]} content={_preview!r}')
+            _preview = (c_content[:60] + '..') if len(c_content) > 60 else c_content
+            print(f'[debug:select] #{_post_idx} author={c_author!r} time={c_publish_time!r} img={c_image_count} fp={c_fingerprint[:8]} content={_preview!r}')
 
-                if target_author:
-                    author_hit = (c_author == target_author) or (target_author in c_author)
-                    if not author_hit:
-                        print(f'[debug:select]   SKIP: author mismatch (want {target_author!r})')
-                        continue
-                if expected_publish_dt is None and last_fingerprint and c_fingerprint == last_fingerprint:
-                    print(f'[debug:select]   SKIP: same fingerprint as last')
+            if target_author:
+                author_hit = (c_author == target_author) or (target_author in c_author)
+                if not author_hit:
+                    print(f'[debug:select]   SKIP: author mismatch (want {target_author!r})')
                     continue
-                age_minutes = _parse_relative_post_age_minutes(c_publish_time)
-                if expected_publish_dt is not None:
-                    if age_minutes is None:
-                        print(f'[debug:select]   SKIP: cannot parse age from {c_publish_time!r}')
-                        continue
-                    inferred_publish_dt = now_for_publish_eval - timedelta(minutes=age_minutes)
-                    delta_minutes = abs(
-                        (inferred_publish_dt - expected_publish_dt).total_seconds()
-                    ) / 60.0
-                    print(f'[debug:select]   age={age_minutes}min, inferred={inferred_publish_dt.strftime("%H:%M")}, expected={expected_publish_dt.strftime("%H:%M")}, delta={delta_minutes:.1f}min, tol={publish_time_tolerance_minutes}min')
-                    if delta_minutes > publish_time_tolerance_minutes:
-                        print(f'[debug:select]   SKIP: delta {delta_minutes:.1f} > tolerance {publish_time_tolerance_minutes}')
-                        continue
-                elif skip_stale_posts:
-                    if age_minutes is not None and age_minutes > max_post_age_minutes:
-                        print(f'[debug:select]   SKIP: stale post ({age_minutes}min > {max_post_age_minutes}min)')
-                        continue
-
-                c_text_for_filter = c_body if c_body else c_content
-                if include_keywords and not any(kw in c_text_for_filter for kw in include_keywords):
-                    print(f'[debug:select]   SKIP: no include keyword match')
+            if expected_publish_dt is None and last_fingerprint and c_fingerprint == last_fingerprint:
+                print(f'[debug:select]   SKIP: same fingerprint as last')
+                continue
+            age_minutes = _parse_relative_post_age_minutes(c_publish_time)
+            if expected_publish_dt is not None:
+                if age_minutes is None:
+                    print(f'[debug:select]   SKIP: cannot parse age from {c_publish_time!r}')
                     continue
-                if exclude_keywords and any(kw in c_text_for_filter for kw in exclude_keywords):
-                    print(f'[debug:select]   SKIP: exclude keyword matched')
+                inferred_publish_dt = now_for_publish_eval - timedelta(minutes=age_minutes)
+                delta_minutes = abs(
+                    (inferred_publish_dt - expected_publish_dt).total_seconds()
+                ) / 60.0
+                print(f'[debug:select]   age={age_minutes}min, inferred={inferred_publish_dt.strftime("%H:%M")}, expected={expected_publish_dt.strftime("%H:%M")}, delta={delta_minutes:.1f}min, tol={publish_time_tolerance_minutes}min')
+                if delta_minutes > publish_time_tolerance_minutes:
+                    print(f'[debug:select]   SKIP: delta {delta_minutes:.1f} > tolerance {publish_time_tolerance_minutes}')
+                    continue
+            elif skip_stale_posts:
+                if age_minutes is not None and age_minutes > max_post_age_minutes:
+                    print(f'[debug:select]   SKIP: stale post ({age_minutes}min > {max_post_age_minutes}min)')
                     continue
 
-                print(f'[debug:select]   ACCEPTED')
-                selected_item = candidate
-                selected_parsed = (
-                    c_author, c_body, c_content, c_image_count, c_publish_time, c_fingerprint
-                )
-                break
+            c_text_for_filter = c_body if c_body else c_content
+            if include_keywords and not any(kw in c_text_for_filter for kw in include_keywords):
+                print(f'[debug:select]   SKIP: no include keyword match')
+                continue
+            if exclude_keywords and any(kw in c_text_for_filter for kw in exclude_keywords):
+                print(f'[debug:select]   SKIP: exclude keyword matched')
+                continue
+
+            print(f'[debug:select]   ACCEPTED (#{_post_idx} of {_post_idx + _skip_cls_count} items, {_skip_cls_count} non-post skipped)')
+            selected_item = candidate
+            selected_parsed = (
+                c_author, c_body, c_content, c_image_count, c_publish_time, c_fingerprint
+            )
+            break
+        if selected_item is not None:
+            try:
+                selected_item.set_focus()
+            except Exception:
+                pass
         if selected_item is None:
             if fallback_parsed is not None:
                 author, body, content, image_count, publish_time = fallback_parsed
@@ -1715,31 +1721,35 @@ def fetch_and_comment_from_moments_feed(
             time.sleep(0.1)
 
             _selected_item = None
-            for nav_i in range(15):
-                try:
-                    moments_list.type_keys('{DOWN}', pause=0.05)
-                except Exception:
-                    pyautogui.press('down')
-                try:
-                    candidates = [li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
-                except Exception:
-                    moments_list = reacquire_feed_list(retries=4, wait=0.1)
+            try:
+                _all_items = moments_list.children(control_type='ListItem')
+            except Exception:
+                moments_list = reacquire_feed_list(retries=4, wait=0.1)
+                _all_items = moments_list.children(control_type='ListItem')
+            print(f'[debug:override] feed list has {len(_all_items)} total items, looking for fp={fingerprint[:8]}')
+            _post_idx = 0
+            for _idx, _cand in enumerate(_all_items):
+                if _cand.class_name() in ('TimelineCommentCell', 'TimelineSnsAdCell'):
                     continue
-                if not candidates or candidates[0].class_name() in ('TimelineCommentCell', 'TimelineSnsAdCell'):
-                    continue
-                _cand = candidates[0]
+                _post_idx += 1
                 _c_author, _c_body, _c_content, _c_img, _c_time = parse_feed_listitem(_cand)
                 _c_fp = _build_post_fingerprint(
                     content=_c_content, post_time=_c_time,
                     photo_num=_c_img, video_num=0,
                     item_key=_build_item_key(_cand),
                 )
+                _c_preview = (_c_content[:50] + '..') if len(_c_content) > 50 else _c_content
                 if _c_fp == fingerprint:
                     _selected_item = _cand
-                    print(f'[debug:override] matched target post by fingerprint at nav #{nav_i + 1}')
+                    print(f'[debug:override] #{_post_idx} MATCH author={_c_author!r} fp={_c_fp[:8]} content={_c_preview!r}')
                     break
                 else:
-                    print(f'[debug:override] nav #{nav_i + 1} fingerprint mismatch, skip')
+                    print(f'[debug:override] #{_post_idx} skip  author={_c_author!r} fp={_c_fp[:8]} content={_c_preview!r}')
+            if _selected_item is not None:
+                try:
+                    _selected_item.set_focus()
+                except Exception:
+                    pass
 
             if _selected_item is None:
                 result['error'] = 'cannot re-acquire target post for override comment (fingerprint mismatch)'
@@ -1997,40 +2007,41 @@ def fetch_and_comment_from_moments_feed(
 
         print('[debug:reacquire] searching for valid content item')
         selected_item = None
-        for nav_i in range(15):
+        try:
+            all_items = moments_list.children(control_type='ListItem')
+        except Exception:
+            moments_list = reacquire_feed_list(retries=4, wait=0.1)
+            all_items = moments_list.children(control_type='ListItem')
+        print(f'[debug:reacquire] feed list has {len(all_items)} total items')
+        _post_idx = 0
+        for _idx, _cand in enumerate(all_items):
+            cls = _cand.class_name()
+            if 'TimelineCommentCell' in cls or 'TimelineCell' in cls or 'AdGridImage' in cls:
+                continue
+            _post_idx += 1
             try:
-                moments_list.type_keys('{DOWN}', pause=0.05)
+                item_text = _cand.window_text()[:80]
             except Exception:
-                pyautogui.press('down')
+                item_text = '(cannot read)'
+            # 验证作者匹配，防止评论到错误的帖子
+            if target_author and not item_text.startswith(target_author):
+                print(f'[debug:reacquire] #{_post_idx} skip (author mismatch): {item_text}')
+                continue
+            # 验证内容关键字，防止评论到非问题帖子
+            if include_keywords and not any(kw in item_text for kw in include_keywords):
+                print(f'[debug:reacquire] #{_post_idx} skip (no keyword match): {item_text}')
+                continue
+            selected_item = _cand
+            print(f'[debug:reacquire] #{_post_idx} MATCH: {item_text}')
+            break
+        if selected_item is not None:
             try:
-                candidates = [li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
+                selected_item.set_focus()
             except Exception:
-                moments_list = reacquire_feed_list(retries=4, wait=0.1)
-                candidates = [li for li in moments_list.children(control_type='ListItem') if li.has_keyboard_focus()]
-            if candidates:
-                cls = candidates[0].class_name()
-                print(f'[debug:reacquire] nav #{nav_i + 1} focused class={cls}')
-                if 'TimelineCommentCell' not in cls and 'TimelineCell' not in cls and 'AdGridImage' not in cls:
-                    try:
-                        item_text = candidates[0].window_text()[:80]
-                    except Exception:
-                        item_text = '(cannot read)'
-                    # 验证作者匹配，防止评论到错误的帖子
-                    if target_author and not item_text.startswith(target_author):
-                        print(f'[debug:reacquire] skipped (author mismatch): {item_text}')
-                        continue
-                    # 验证内容关键字，防止评论到非问题帖子
-                    if include_keywords and not any(kw in item_text for kw in include_keywords):
-                        print(f'[debug:reacquire] skipped (no keyword match): {item_text}')
-                        continue
-                    selected_item = candidates[0]
-                    print(f'[debug:reacquire] found valid item: {item_text}')
-                    break
-            else:
-                print(f'[debug:reacquire] nav #{nav_i + 1} no focused candidate')
+                pass
 
         if selected_item is None:
-            print('[debug:reacquire] FAILED - no valid item found after 15 attempts')
+            print('[debug:reacquire] FAILED - no valid item found in feed list')
             result['error'] = 'cannot re-acquire post for commenting'
             return result
 
