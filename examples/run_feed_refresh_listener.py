@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
@@ -16,28 +15,15 @@ import win32gui
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from pyweixin.rush_ai import ArkChatProvider, PaddleOCRProvider
-
-
-def load_api_key() -> str:
-    """Load ARK API key from local config or environment."""
-    key_file = PROJECT_ROOT / "config" / ".local_secrets.json"
-    if key_file.exists():
-        try:
-            with open(key_file, "r", encoding="utf-8-sig") as f:
-                data = json.load(f)
-                return str(data.get("ARK_API_KEY", ""))
-        except Exception as exc:
-            print(f"Warning: failed to read {key_file}: {exc}")
-    return os.getenv("ARK_API_KEY", "")
+from pyweixin.rush_ai import PaddleOCRProvider, build_default_ai_provider, normalize_ai_provider_name
 
 
 def main() -> None:
     if len(sys.argv) < 3:
-        print("Usage: python examples/run_feed_refresh_listener.py <publish_time_HH:MM> <target_author> [poll_interval_sec] [--suffix 男]")
+        print("Usage: python examples/run_feed_refresh_listener.py <publish_time_HH:MM> <target_author> [poll_interval_sec] [--answer-mode standard|count_suffix] [--suffix 男]")
         print("Example: python examples/run_feed_refresh_listener.py 19:15 小蔡")
         print("Example: python examples/run_feed_refresh_listener.py 19:15 小蔡 0.5")
-        print("Example: python examples/run_feed_refresh_listener.py 19:15 小蔡 0.5 --suffix 男  (拼车模式)")
+        print("Example: python examples/run_feed_refresh_listener.py 19:15 小蔡 0.5 --answer-mode count_suffix --suffix 男")
         return
 
     publish_time_str = sys.argv[1]
@@ -45,15 +31,39 @@ def main() -> None:
 
     # Parse --suffix from anywhere in argv
     answer_suffix = None
+    answer_mode = None
     filtered_argv = []
     i = 3
     while i < len(sys.argv):
         if sys.argv[i] == "--suffix" and i + 1 < len(sys.argv):
             answer_suffix = sys.argv[i + 1]
             i += 2
+        elif sys.argv[i] == "--answer-mode" and i + 1 < len(sys.argv):
+            answer_mode = sys.argv[i + 1]
+            i += 2
         else:
             filtered_argv.append(sys.argv[i])
             i += 1
+
+    raw_answer_mode = (answer_mode or os.getenv("PYWEIXIN_ANSWER_MODE", "") or "").strip().lower()
+    if raw_answer_mode == "count_suffix":
+        answer_mode = "count_suffix"
+    elif raw_answer_mode == "standard":
+        answer_mode = "standard"
+    else:
+        answer_mode = "count_suffix" if answer_suffix else "standard"
+    if answer_mode == "count_suffix":
+        if not answer_suffix:
+            print("Error: answer_mode=count_suffix requires --suffix")
+            return
+    elif answer_suffix:
+        print("[config] answer_mode=standard, ignore suffix")
+        answer_suffix = None
+    os.environ["PYWEIXIN_ANSWER_MODE"] = answer_mode
+    if answer_suffix:
+        os.environ["PYWEIXIN_ANSWER_SUFFIX"] = answer_suffix
+    else:
+        os.environ.pop("PYWEIXIN_ANSWER_SUFFIX", None)
 
     poll_interval = 0.5
     if filtered_argv:
@@ -96,13 +106,13 @@ def main() -> None:
     if publish_time_tolerance_minutes < 1:
         publish_time_tolerance_minutes = 1
 
-    api_key = load_api_key()
-    if not api_key:
-        print("Error: missing ARK_API_KEY")
-        print("Set config/.local_secrets.json or environment variable ARK_API_KEY")
+    try:
+        provider_name = normalize_ai_provider_name(None)
+        ai_provider = build_default_ai_provider(config_dir=str(PROJECT_ROOT / "config"))
+    except ValueError as exc:
+        print(f"Error: {exc}")
         return
-
-    ai_provider = ArkChatProvider(api_key=api_key)
+    print(f"[AI] provider={provider_name} model={getattr(ai_provider, 'model', '')}")
     compare_with_ai_after_ocr_hit = os.getenv("PYWEIXIN_COMPARE_AI_AFTER_OCR_HIT", "").strip().lower() in {
         "1",
         "true",
@@ -163,7 +173,9 @@ def main() -> None:
     print(f"Poll interval: {poll_interval:.2f}s")
     print(f"Output dir:    {output_dir}")
     if answer_suffix:
-        print(f"Mode:          拼车模式 (suffix={answer_suffix})")
+        print(f"Mode:          {answer_mode} (suffix={answer_suffix})")
+    else:
+        print(f"Mode:          {answer_mode}")
     print("=" * 60)
 
     state: dict = {}
@@ -192,6 +204,7 @@ def main() -> None:
         ai_provider=ai_provider,
         verbose=True,
         known_keywords=known_keywords,
+        answer_mode=answer_mode,
         answer_suffix=answer_suffix,
     )
 
@@ -281,6 +294,12 @@ def main() -> None:
             author = str(result.get("author", ""))
             preview = (content[:60] + "...") if content else "(empty)"
             print(f"[{now.strftime('%H:%M:%S')}] author={author or '(unknown)'} content={preview}")
+            if result.get("ai_provider") or result.get("ai_model") or result.get("ai_latency_ms") is not None:
+                print(
+                    f"[AI] provider={result.get('ai_provider', '')} "
+                    f"model={result.get('ai_model', '')} "
+                    f"latency={result.get('ai_latency_ms')}ms"
+                )
 
             if result.get("ai_answer"):
                 if (not bool(result.get("comment_attempted"))) and (not bool(result.get("comment_posted"))):
@@ -305,6 +324,9 @@ def main() -> None:
                 state["comment_text"] = str(result.get("ai_answer"))
                 state["comment_time"] = now.isoformat()
                 state["comment_posted"] = bool(result.get("comment_posted"))
+                state["ai_provider"] = str(result.get("ai_provider", "") or "")
+                state["ai_model"] = str(result.get("ai_model", "") or "")
+                state["ai_latency_ms"] = result.get("ai_latency_ms")
                 save_state()
                 print("=" * 60)
                 if result.get("comment_posted"):

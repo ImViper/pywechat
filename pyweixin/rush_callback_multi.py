@@ -18,6 +18,20 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     _PILImage = None
 
+ANSWER_MODE_STANDARD = "standard"
+ANSWER_MODE_COUNT_SUFFIX = "count_suffix"
+
+
+def _normalize_answer_mode(answer_mode: str | None) -> str:
+    mode = str(answer_mode or ANSWER_MODE_STANDARD).strip().lower()
+    if mode in {"count_suffix", "suffix", "count_only"}:
+        return ANSWER_MODE_COUNT_SUFFIX
+    return ANSWER_MODE_STANDARD
+
+
+def _is_count_suffix_mode(answer_mode: str | None, answer_suffix: str | None) -> bool:
+    return _normalize_answer_mode(answer_mode) == ANSWER_MODE_COUNT_SUFFIX and bool(answer_suffix)
+
 
 # ---------------------------------------------------------------------------
 # AI image optimization (for speed, OCR still uses original images)
@@ -117,6 +131,7 @@ class PriorityAnswerQueue:
     def __init__(self):
         self._q: queue.PriorityQueue = queue.PriorityQueue()
         self._counter = 0  # tie-breaker，保证 FIFO 稳定性
+        self.ai_metadata: dict[str, Any] = {}
 
     def put(self, answer: str | None, priority: int = 10) -> None:
         if answer is None:
@@ -200,6 +215,7 @@ class TemplateMatchCommentSource:
         templates: list | None = None,
         known_answers: dict[str, str] | None = None,
         known_keywords: list[str] | None = None,
+        answer_mode: str = ANSWER_MODE_STANDARD,
         answer_suffix: str | None = None,
         enable_math: bool = True,
     ):
@@ -214,12 +230,13 @@ class TemplateMatchCommentSource:
         self.templates = templates or []
         self.known_answers = known_answers or {}
         self.known_keywords = known_keywords or list(self.known_answers.keys())
+        self.answer_mode = answer_mode
         self.answer_suffix = answer_suffix
         self.enable_math = enable_math
 
     def _apply_suffix(self, answer: str) -> str:
         """提取前导数字，拼接 suffix。 '5楚凭阑' + suffix='男' → '5男'"""
-        if not self.answer_suffix:
+        if not _is_count_suffix_mode(self.answer_mode, self.answer_suffix):
             return answer
         m = re.match(r'^(\d+)', answer)
         if m:
@@ -378,10 +395,12 @@ class OCRCommentSource:
         self,
         ocr_provider: Any,
         known_keywords: list[str] | None = None,
+        answer_mode: str = ANSWER_MODE_STANDARD,
         answer_suffix: str | None = None,
     ):
         self.ocr_provider = ocr_provider
         self.known_keywords = known_keywords
+        self.answer_mode = answer_mode
         self.answer_suffix = answer_suffix
 
     def generate(self, content: str, image_paths: list[str]) -> str | None:
@@ -400,7 +419,7 @@ class OCRCommentSource:
             verbose=True,
             known_keywords=self.known_keywords,
         )
-        if answer and self.answer_suffix:
+        if answer and _is_count_suffix_mode(self.answer_mode, self.answer_suffix):
             import re
 
             m = re.match(r"^(\d+)", answer)
@@ -414,8 +433,16 @@ class AICommentSource:
 
     priority = 1
 
-    def __init__(self, ai_provider: Any):
+    def __init__(
+        self,
+        ai_provider: Any,
+        answer_mode: str = ANSWER_MODE_STANDARD,
+        answer_suffix: str | None = None,
+    ):
         self.ai_provider = ai_provider
+        self.answer_mode = answer_mode
+        self.answer_suffix = answer_suffix
+        self.last_metadata: dict[str, Any] = {}
 
     def generate(self, content: str, image_paths: list[str]) -> str | None:
         # 支持 DeferredImagePaths — 等待图片就绪
@@ -424,10 +451,22 @@ class AICommentSource:
         if not image_paths:
             return None
 
-        from .rush_callback import try_ai_answer
+        from .rush_callback import get_last_ai_metadata, try_ai_answer
 
         ai_images = _prepare_ai_images(image_paths, verbose=True)
-        return try_ai_answer(content, ai_images, self.ai_provider, verbose=True)
+        answer = try_ai_answer(
+            content,
+            ai_images,
+            self.ai_provider,
+            verbose=True,
+            answer_mode=self.answer_mode,
+            answer_suffix=self.answer_suffix,
+        )
+        self.last_metadata = get_last_ai_metadata(self.ai_provider)
+        return answer
+
+    def get_last_metadata(self) -> dict[str, Any]:
+        return dict(self.last_metadata)
 
 
 class CannedCommentSource:
@@ -634,6 +673,10 @@ def create_multi_source_streaming_callback(
             try:
                 result = source.generate(content, image_paths)
                 elapsed = int((time.time() - start) * 1000)
+                if hasattr(source, "get_last_metadata"):
+                    meta = source.get_last_metadata()
+                    if meta:
+                        answer_queue.ai_metadata = meta
 
                 # 处理单条或多条结果
                 if result is None:

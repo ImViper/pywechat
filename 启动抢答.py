@@ -6,13 +6,13 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
+from pyweixin.rush_ai import build_default_ai_provider, normalize_ai_provider_name
 from pyweixin.runtime_env import apply_runtime_env, load_and_apply_runtime_env
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -25,28 +25,6 @@ def _pause() -> None:
         pass
 
 
-def load_api_key() -> str:
-    """Load ARK_API_KEY from config/.local_env.bat or config/.local_secrets.json."""
-    # Try .local_env.bat (set ARK_API_KEY=xxx)
-    env_bat = PROJECT_ROOT / "config" / ".local_env.bat"
-    if env_bat.exists():
-        for line in env_bat.read_text(encoding="utf-8", errors="ignore").splitlines():
-            line = line.strip()
-            if line.lower().startswith("set ark_api_key="):
-                return line.split("=", 1)[1].strip()
-
-    # Try .local_secrets.json
-    secrets = PROJECT_ROOT / "config" / ".local_secrets.json"
-    if secrets.exists():
-        try:
-            data = json.loads(secrets.read_text(encoding="utf-8-sig"))
-            return str(data.get("ARK_API_KEY", ""))
-        except Exception:
-            pass
-
-    return os.getenv("ARK_API_KEY", "")
-
-
 def main() -> None:
     print("=" * 56)
     print("          PyWechat 朋友圈抢答助手")
@@ -56,14 +34,14 @@ def main() -> None:
     print("=" * 56)
     print()
 
-    # Load API key
-    api_key = load_api_key()
-    if not api_key:
-        print("[错误] 未找到 ARK_API_KEY")
-        print("请在 config/.local_secrets.json 或 config/.local_env.bat 中配置")
+    try:
+        provider_name = normalize_ai_provider_name(None)
+        ai_provider = build_default_ai_provider(config_dir=str(PROJECT_ROOT / "config"))
+    except ValueError as exc:
+        print(f"[错误] {exc}")
         _pause()
         return
-    os.environ["ARK_API_KEY"] = api_key
+    print(f"[config] AI provider={provider_name} model={getattr(ai_provider, 'model', '')}")
 
     # Runtime tuning now comes from config/rush_runtime_env.json (profile=startup).
     # Fallback to a tiny in-code baseline if config file is missing.
@@ -71,14 +49,15 @@ def main() -> None:
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
         "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
-        "PYWEIXIN_HOOK_ENABLED": "1",
+        "PYWEIXIN_HOOK_ENABLED": "0",
         "PYWEIXIN_HOOK_BATCH_MODE": "fast_first_batch",
         "PYWEIXIN_HOOK_MAX_CONCURRENCY": "1",
     }
     apply_runtime_env(fallback_defaults, only_if_missing=True)
+    runtime_profile_name = os.getenv("PYWEIXIN_RUNTIME_PROFILE", "startup").strip() or "startup"
     runtime_path, runtime_profile, runtime_applied = load_and_apply_runtime_env(
         config_path=PROJECT_ROOT / "config" / "rush_runtime_env.json",
-        profile="startup",
+        profile=runtime_profile_name,
         only_if_missing=True,
     )
     if runtime_applied:
@@ -91,9 +70,13 @@ def main() -> None:
     print("[config] effective runtime params:")
     for key in [
         "PYWEIXIN_FIRST_ANSWER_MODE",
+        "PYWEIXIN_ANSWER_MODE",
+        "PYWEIXIN_AI_PROVIDER",
         "PYWEIXIN_ARK_MODEL",
+        "PYWEIXIN_DASHSCOPE_MODEL",
         "PYWEIXIN_ARK_IMAGE_DETAIL",
         "PYWEIXIN_ARK_TIMEOUT_SEC",
+        "PYWEIXIN_DASHSCOPE_TIMEOUT_SEC",
         "PYWEIXIN_AI_IMAGE_OPTIMIZE",
         "PYWEIXIN_AI_IMAGE_MAX_SIDE",
         "PYWEIXIN_AI_IMAGE_JPEG_QUALITY",
@@ -119,8 +102,23 @@ def main() -> None:
 
     print()
     print("以下选填，不填直接回车跳过")
-    suffix = input("1. 抢答后缀 (如 男): ").strip()
-    canned = input("2. 预制话术 (逗号分隔, 如 666,沙发): ").strip()
+    default_answer_mode = (os.getenv("PYWEIXIN_ANSWER_MODE", "standard") or "standard").strip().lower()
+    default_mode_choice = "2" if default_answer_mode == "count_suffix" else "1"
+    mode_choice = input(
+        f"1. 抢答模式 (1=标准抢答, 2=拼车数数题, 默认{default_mode_choice}): "
+    ).strip()
+    answer_mode = "count_suffix" if mode_choice == "2" else "standard"
+    if not mode_choice and default_answer_mode == "count_suffix":
+        answer_mode = "count_suffix"
+
+    suffix = ""
+    if answer_mode == "count_suffix":
+        suffix = input("2. 拼车后缀 (如 男): ").strip()
+        if not suffix:
+            print("拼车数数题模式必须填写后缀")
+            _pause()
+            return
+    canned = input("3. 预制话术 (逗号分隔, 如 666,沙发): ").strip()
 
     # Build command
     cmd = [
@@ -131,7 +129,9 @@ def main() -> None:
         "--runtime-config",
         str(PROJECT_ROOT / "config" / "rush_runtime_env.json"),
         "--runtime-profile",
-        "startup",
+        runtime_profile_name,
+        "--answer-mode",
+        answer_mode,
     ]
     if suffix:
         cmd += ["--suffix", suffix]

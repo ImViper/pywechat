@@ -61,6 +61,7 @@ python examples/run_feed_multi_comment_listener.py 19:15 小蔡 ^
     --ocr-retry ^
     --max-comments 5 ^
     --poll-interval 0.5 ^
+    --answer-mode count_suffix ^
     --suffix 男
 ```
 
@@ -102,7 +103,8 @@ python examples/run_feed_multi_comment_listener.py 19:15 小蔡 ^
 | `publish_time` | 必需 | - | 预期发布时间（HH:MM 格式） |
 | `target_author` | 必需 | - | 目标作者名称 |
 | `--poll-interval` | float | 0.5 | 轮询间隔（秒） |
-| `--suffix` | string | None | 答案后缀（如"男"） |
+| `--answer-mode` | string | `standard` | 答案模式：`standard` 为标准抢答，`count_suffix` 为拼车数数题 |
+| `--suffix` | string | None | 拼车模式后缀（如"男"）；仅 `count_suffix` 下生效，OCR/模板/AI 都会统一转成 `数字+后缀`，AI 只要求返回数字 |
 | `--canned` | string | None | 预制话术（逗号分隔） |
 | `--ocr-retry` | flag | False | 启用 OCR 重试 |
 | `--max-comments` | int | 5 | 每帖最多评论数 |
@@ -118,7 +120,7 @@ python examples/run_feed_multi_comment_listener.py 19:15 小蔡 ^
 
 ```bash
 # Hook 配置（脚本自动设置）
-PYWEIXIN_HOOK_ENABLED=1
+PYWEIXIN_HOOK_ENABLED=0
 PYWEIXIN_HOOK_BATCH_MODE=fast_first_batch
 PYWEIXIN_HOOK_MAX_CONCURRENCY=1  # Serial Mode
 
@@ -131,6 +133,16 @@ PYWEIXIN_OCR_MAX_SIDE=1200
 # API 配置（必需）
 ARK_API_KEY=your_api_key
 ```
+
+如需自己调试 Hook：
+
+- 显式设置 `PYWEIXIN_HOOK_ENABLED=1`
+- 如确实还要自动注入 DLL，再额外设置 `PYWEIXIN_HOOK_AUTO_INJECT=1`
+
+推荐约定：
+
+- 标准抢答：不传 `--suffix`，或显式传 `--answer-mode standard`
+- 拼车数数题：传 `--answer-mode count_suffix --suffix 男`
 
 ## 输出文件
 

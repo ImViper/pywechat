@@ -1124,6 +1124,9 @@ def fetch_and_comment_friend_moment(
         'publish_time': '',
         'fingerprint': '',
         'ai_answer': None,
+        'ai_provider': '',
+        'ai_model': '',
+        'ai_latency_ms': None,
         'comment_posted': False,
         'error': None,
         'image_paths': [],
@@ -1495,6 +1498,9 @@ def fetch_and_comment_from_moments_feed(
         'publish_time': '',
         'fingerprint': '',
         'ai_answer': None,
+        'ai_provider': '',
+        'ai_model': '',
+        'ai_latency_ms': None,
         'comment_attempted': False,
         'comment_posted': False,
         'error': None,
@@ -1547,6 +1553,22 @@ def fetch_and_comment_from_moments_feed(
             author = parts[0].strip()
             body = parts[1].strip() if len(parts) > 1 else ''
         return author, body, content, image_count, post_time
+
+    def _apply_ai_metadata(meta: dict | None) -> None:
+        if not isinstance(meta, dict):
+            return
+        provider = str(meta.get("provider", "") or "")
+        model = str(meta.get("model", "") or "")
+        latency_ms = meta.get("latency_ms")
+        if provider:
+            result["ai_provider"] = provider
+        if model:
+            result["ai_model"] = model
+        if latency_ms is not None:
+            try:
+                result["ai_latency_ms"] = int(latency_ms)
+            except Exception:
+                pass
 
     try:
         if moments_window is None:
@@ -1771,9 +1793,9 @@ def fetch_and_comment_from_moments_feed(
             if not posted and not result.get('error'):
                 result['error'] = 'override comment flow finished but send was not verified'
             return result
-        # Force enable Hook if not explicitly disabled.
+        # Hook is opt-in. Default stays disabled unless explicitly enabled.
         if os.environ.get('PYWEIXIN_HOOK_ENABLED') is None:
-            os.environ['PYWEIXIN_HOOK_ENABLED'] = '1'
+            os.environ['PYWEIXIN_HOOK_ENABLED'] = '0'
 
         _hook_dispatcher = None
         _use_hook = False
@@ -1859,6 +1881,8 @@ def fetch_and_comment_from_moments_feed(
                 tm_source = TemplateMatchCommentSource(
                     known_answers=known_answers,
                     templates=templates,
+                    answer_mode=os.environ.get("PYWEIXIN_ANSWER_MODE", "standard"),
+                    answer_suffix=os.environ.get("PYWEIXIN_ANSWER_SUFFIX") or None,
                     enable_math=True
                 )
                 
@@ -3210,6 +3234,7 @@ def fetch_and_comment_from_moments_feed(
             total_ms = int((time.time() - parallel_start) * 1000)
             print(f'[debug:main] streaming done: {comment_count} comments, {total_ms}ms total')
             result['ai_answer'] = all_answers if len(all_answers) != 1 else all_answers[0]
+            _apply_ai_metadata(getattr(answer_queue, "ai_metadata", None))
             result['comment_posted'] = posted_any
             if not posted_any and not result.get('error'):
                 result['error'] = 'comment flow finished but send was not verified'

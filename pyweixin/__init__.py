@@ -57,7 +57,17 @@ from pyweixin.moments_ext import (
 )
 from pyweixin.rush_engine import run_rush_loop,load_rush_config,resolve_answer,parse_answer_from_templates
 from pyweixin.rush_types import RushConfig,QuestionTemplate,AnswerResult
-from pyweixin.rush_ai import ArkResponsesProvider,SiliconFlowOpenAIProvider,NullAIProvider,NullOCRProvider,PaddleOCRProvider
+from pyweixin.rush_ai import (
+    AliyunDashScopeOpenAIProvider,
+    ArkChatProvider,
+    ArkResponsesProvider,
+    SiliconFlowOpenAIProvider,
+    NullAIProvider,
+    NullOCRProvider,
+    PaddleOCRProvider,
+    build_default_ai_provider,
+    normalize_ai_provider_name,
+)
 from pyweixin.rush_callback_multi import (
     OCRCommentSource,
     AICommentSource,

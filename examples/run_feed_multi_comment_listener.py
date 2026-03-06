@@ -21,6 +21,7 @@ Examples:
         --ocr-retry ^
         --max-comments 5 ^
         --poll-interval 0.5 ^
+        --answer-mode count_suffix ^
         --suffix 男
 """
 
@@ -40,7 +41,7 @@ import win32gui
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from pyweixin.rush_ai import ArkChatProvider, PaddleOCRProvider
+from pyweixin.rush_ai import PaddleOCRProvider, build_default_ai_provider, normalize_ai_provider_name
 from pyweixin.rush_callback_multi import (
     OCRCommentSource,
     AICommentSource,
@@ -58,21 +59,6 @@ from pyweixin.runtime_env import (
     load_runtime_env_config,
 )
 from pyweixin.WeChatTools import Navigator
-
-
-def load_api_key() -> str:
-    """Load ARK API key from local config or environment."""
-    key_file = PROJECT_ROOT / "config" / ".local_secrets.json"
-    if key_file.exists():
-        try:
-            with open(key_file, "r", encoding="utf-8-sig") as f:
-                data = json.load(f)
-                return str(data.get("ARK_API_KEY", ""))
-        except Exception as exc:
-            print(f"Warning: failed to read {key_file}: {exc}")
-    return os.getenv("ARK_API_KEY", "")
-
-
 def main() -> None:
     def safe_console_print(message: str) -> None:
         try:
@@ -94,6 +80,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--suffix", type=str, default=None, help="Answer suffix (e.g., '男')"
+    )
+    parser.add_argument(
+        "--answer-mode",
+        type=str,
+        default=None,
+        choices=["standard", "count_suffix"],
+        help="Answer normalization mode: standard or count_suffix"
     )
     parser.add_argument(
         "--canned", type=str, default=None, help="Canned comments (comma-separated)"
@@ -153,7 +146,7 @@ def main() -> None:
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
         "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
-        "PYWEIXIN_HOOK_ENABLED": "1",
+        "PYWEIXIN_HOOK_ENABLED": "0",
         "PYWEIXIN_HOOK_BATCH_MODE": "fast_first_batch",
         "PYWEIXIN_HOOK_MAX_CONCURRENCY": "1",
     }
@@ -178,6 +171,30 @@ def main() -> None:
         else:
             print(f"Runtime env config not loaded from {runtime_path}, using fallback defaults")
 
+    raw_answer_mode = (
+        args.answer_mode
+        or os.getenv("PYWEIXIN_ANSWER_MODE", "")
+        or ""
+    ).strip().lower()
+    if raw_answer_mode == "count_suffix":
+        answer_mode = "count_suffix"
+    elif raw_answer_mode == "standard":
+        answer_mode = "standard"
+    else:
+        answer_mode = "count_suffix" if answer_suffix else "standard"
+    if answer_mode == "count_suffix":
+        if not answer_suffix:
+            print("Error: answer_mode=count_suffix requires --suffix")
+            return
+    elif answer_suffix:
+        print("[config] answer_mode=standard, ignore suffix")
+        answer_suffix = None
+    os.environ["PYWEIXIN_ANSWER_MODE"] = answer_mode
+    if answer_suffix:
+        os.environ["PYWEIXIN_ANSWER_SUFFIX"] = answer_suffix
+    else:
+        os.environ.pop("PYWEIXIN_ANSWER_SUFFIX", None)
+
     first_answer_mode = (
         args.first_answer_mode
         or os.getenv("PYWEIXIN_FIRST_ANSWER_MODE", "auto")
@@ -187,15 +204,23 @@ def main() -> None:
         "1", "true", "yes", "on"
     }
     print(f"[config] effective first_answer_mode={first_answer_mode}")
+    print(f"[config] effective answer_mode={answer_mode}")
     print(f"[config] effective disable_ocr={disable_ocr}")
     print("[config] effective runtime params:")
     for key in [
+        "PYWEIXIN_ANSWER_MODE",
+        "PYWEIXIN_AI_PROVIDER",
         "PYWEIXIN_ARK_MODEL",
+        "PYWEIXIN_DASHSCOPE_MODEL",
         "PYWEIXIN_ARK_IMAGE_DETAIL",
         "PYWEIXIN_ARK_TIMEOUT_SEC",
+        "PYWEIXIN_DASHSCOPE_TIMEOUT_SEC",
         "PYWEIXIN_ARK_MAX_TOKENS",
+        "PYWEIXIN_DASHSCOPE_MAX_TOKENS",
         "PYWEIXIN_ARK_TEMPERATURE",
+        "PYWEIXIN_DASHSCOPE_TEMPERATURE",
         "PYWEIXIN_ARK_TOP_P",
+        "PYWEIXIN_DASHSCOPE_TOP_P",
         "PYWEIXIN_AI_IMAGE_OPTIMIZE",
         "PYWEIXIN_AI_IMAGE_MAX_SIDE",
         "PYWEIXIN_AI_IMAGE_JPEG_QUALITY",
@@ -244,14 +269,15 @@ def main() -> None:
         publish_time_tolerance_minutes = 1
 
     # Load API key
-    api_key = load_api_key()
-    if not api_key:
-        print("Error: missing ARK_API_KEY")
+    try:
+        provider_name = normalize_ai_provider_name(None)
+        ai_provider = build_default_ai_provider(config_dir=str(PROJECT_ROOT / "config"))
+    except ValueError as exc:
+        print(f"Error: {exc}")
         return
+    print(f"[AI] provider={provider_name} model={getattr(ai_provider, 'model', '')}")
 
     # Initialize providers
-    ai_provider = ArkChatProvider(api_key=api_key)
-
     ocr_provider = None
     if disable_ocr:
         print("OCR disabled by PYWEIXIN_DISABLE_OCR")
@@ -275,12 +301,12 @@ def main() -> None:
             print("Warning: PaddleOCR unavailable, OCR disabled")
 
     # ----------------------------------------------------------------
-    # Auto-inject Hook DLL (default enabled)
+    # Optional Hook DLL auto-injection (default disabled)
     # ----------------------------------------------------------------
-    if os.environ.get("PYWEIXIN_HOOK_ENABLED") is None:
-        os.environ["PYWEIXIN_HOOK_ENABLED"] = "1"  # 默认启用 Hook
-
-    if os.environ.get("PYWEIXIN_HOOK_ENABLED", "0") == "1":
+    hook_auto_inject = os.environ.get("PYWEIXIN_HOOK_AUTO_INJECT", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if hook_auto_inject:
         try:
             from pyweixin.hook_injector import find_wechat_pid, inject_dll, is_dll_loaded
 
@@ -298,9 +324,9 @@ def main() -> None:
                     else:
                         print(f"Warning: Hook DLL not found at {dll_path}")
             else:
-                print("Warning: WeChat process not found, Hook disabled")
+                print("Warning: WeChat process not found, skip Hook auto-inject")
         except Exception as exc:
-            print(f"Warning: Hook DLL injection failed: {exc}")
+            print(f"Warning: Hook DLL auto-injection failed: {exc}")
 
     # Build comment sources
     known_keywords = [
@@ -336,7 +362,7 @@ def main() -> None:
 
     if first_answer_mode == "auto":
         # Source -1: NumberGuess scatter shot (priority -2, queue_priority 20)
-        if not args.no_guess and answer_suffix:
+        if not args.no_guess and answer_mode == "count_suffix" and answer_suffix:
             try:
                 gmin, gmax = [int(x.strip()) for x in args.guess_range.split(",")]
             except ValueError:
@@ -357,6 +383,7 @@ def main() -> None:
                     templates=rush_templates,
                     known_answers=known_answers,
                     known_keywords=known_keywords,
+                    answer_mode=answer_mode,
                     answer_suffix=answer_suffix,
                     enable_math=enable_math,
                 )
@@ -369,12 +396,23 @@ def main() -> None:
     # Source 1: OCR (priority 0, fastest)
     if ocr_provider:
         sources.append(
-            OCRCommentSource(ocr_provider, known_keywords, answer_suffix)
+            OCRCommentSource(
+                ocr_provider,
+                known_keywords,
+                answer_mode=answer_mode,
+                answer_suffix=answer_suffix,
+            )
         )
 
     # Source 2: AI (priority 1, queue_priority 0 = 最高优先级！)
     if ai_provider:
-        sources.append(AICommentSource(ai_provider))
+        sources.append(
+            AICommentSource(
+                ai_provider,
+                answer_mode=answer_mode,
+                answer_suffix=answer_suffix,
+            )
+        )
 
     # Source 3: Canned comments (priority 2, instant)
     if args.canned:
@@ -431,6 +469,9 @@ def main() -> None:
     print(f"Poll interval: {poll_interval:.2f}s")
     print(f"Max comments:  {max_comments}")
     print(f"First mode:    {first_answer_mode}")
+    print(f"Answer mode:   {answer_mode}")
+    if answer_suffix:
+        print(f"Suffix:        {answer_suffix}")
     print(f"Comment sources: {[s.__class__.__name__ for s in sources]}")
     print(f"Dedup enabled: {dedup_enabled}")
     print(f"Output dir:    {output_dir}")
@@ -473,7 +514,7 @@ def main() -> None:
             return
 
     # Set environment for fast_first_batch mode
-    os.environ.setdefault("PYWEIXIN_HOOK_ENABLED", "1")
+    os.environ.setdefault("PYWEIXIN_HOOK_ENABLED", "0")
     os.environ.setdefault("PYWEIXIN_HOOK_BATCH_MODE", "fast_first_batch")
     os.environ.setdefault("PYWEIXIN_HOOK_MAX_CONCURRENCY", "1")  # Serial Mode
 
@@ -484,6 +525,7 @@ def main() -> None:
     comment_send_attempts = 0
     max_comment_sends = int(os.getenv("PYWEIXIN_COMMENT_MAX_SENDS", "3"))
     cached_ai_answer = None  # 缓存首次 AI 答案，重试时直接复用
+    cached_ai_meta: dict[str, object] | None = None
 
     try:
         while True:
@@ -569,6 +611,10 @@ def main() -> None:
             author = str(result.get("author", ""))
             preview = (content[:120] + "...") if content else "(empty)"
             safe_console_print(f"[{now.strftime('%H:%M:%S')}] author={author} content={preview}")
+            if (not result.get("ai_provider")) and cached_ai_meta:
+                result["ai_provider"] = cached_ai_meta.get("provider", "")
+                result["ai_model"] = cached_ai_meta.get("model", "")
+                result["ai_latency_ms"] = cached_ai_meta.get("latency_ms")
 
             retry_same_post_on_fail = os.getenv(
                 "PYWEIXIN_RETRY_SAME_FINGERPRINT_ON_POST_FAIL", "1"
@@ -608,6 +654,12 @@ def main() -> None:
                 comment_send_attempts += 1
                 if cached_ai_answer is None:
                     cached_ai_answer = result.get("ai_answer")
+                if result.get("ai_provider") or result.get("ai_model") or result.get("ai_latency_ms") is not None:
+                    cached_ai_meta = {
+                        "provider": result.get("ai_provider", ""),
+                        "model": result.get("ai_model", ""),
+                        "latency_ms": result.get("ai_latency_ms"),
+                    }
 
                 # 更新状态
                 last_fingerprint = fingerprint
@@ -617,9 +669,21 @@ def main() -> None:
                 state["comment_text"] = str(result.get("ai_answer"))
                 state["comment_time"] = now.isoformat()
                 state["comment_posted"] = bool(result.get("comment_posted"))
+                state["ai_provider"] = str(result.get("ai_provider", "") or "")
+                state["ai_model"] = str(result.get("ai_model", "") or "")
+                state["ai_latency_ms"] = result.get("ai_latency_ms")
                 save_state()
 
                 print("=" * 60)
+                if result.get("ai_provider") or result.get("ai_model") or result.get("ai_latency_ms") is not None:
+                    provider_label = str(result.get("ai_provider", "") or "")
+                    model_label = str(result.get("ai_model", "") or "")
+                    latency_label = result.get("ai_latency_ms")
+                    cached_note = " (cached)" if comment_send_attempts > 1 and cached_ai_answer is not None else ""
+                    print(
+                        f"[AI] provider={provider_label} model={model_label} "
+                        f"latency={latency_label}ms{cached_note}"
+                    )
                 if result.get("comment_posted"):
                     print(f"[send {comment_send_attempts}/{max_comment_sends}] Posted: {result.get('ai_answer')}")
                 else:

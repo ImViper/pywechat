@@ -17,6 +17,84 @@ except ImportError:  # pragma: no cover - for direct module import in local test
     from rush_types import AnswerResult, QuestionTemplate
 
 
+def _read_json_file(path: str) -> dict[str, Any]:
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _read_local_env_file(path: str) -> dict[str, str]:
+    env_map: dict[str, str] = {}
+    if not path or not os.path.isfile(path):
+        return env_map
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception:
+        return env_map
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("::") or line.lower().startswith("rem "):
+            continue
+        if line.lower().startswith("@echo"):
+            continue
+        if line.lower().startswith("set "):
+            key, _, value = line[4:].partition("=")
+            key = key.strip()
+            value = value.strip()
+            if key:
+                env_map[key] = value
+    return env_map
+
+
+def _resolve_api_key(
+    env_names: list[str],
+    config_dir: str | None = None,
+    json_keys: list[str] | None = None,
+) -> str:
+    for env_name in env_names:
+        value = os.getenv(env_name, "").strip()
+        if value:
+            return value
+
+    config_root = (config_dir or "").strip()
+    if not config_root:
+        return ""
+
+    env_file = os.path.join(config_root, ".local_env.bat")
+    file_env = _read_local_env_file(env_file)
+    for env_name in env_names:
+        value = str(file_env.get(env_name, "")).strip()
+        if value:
+            return value
+
+    secrets_file = os.path.join(config_root, ".local_secrets.json")
+    secret_data = _read_json_file(secrets_file)
+    for key in (json_keys or env_names):
+        value = str(secret_data.get(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def normalize_ai_provider_name(provider: str | None) -> str:
+    value = (provider or os.getenv("PYWEIXIN_AI_PROVIDER", "")).strip().lower()
+    if value in {"", "ark", "doubao", "volcengine", "volces"}:
+        return "ark"
+    if value in {"aliyun", "dashscope", "bailian", "qwen", "qwen3.5plus", "qwen3.5-plus"}:
+        return "aliyun"
+    if value in {"siliconflow", "silicon_flow"}:
+        return "siliconflow"
+    raise ValueError(f"Unsupported AI provider: {provider}")
+
+
 class AIAnswerProvider(Protocol):
     """Implement this protocol to plug your own model."""
 
@@ -270,6 +348,9 @@ class SiliconFlowOpenAIProvider:
     def __post_init__(self) -> None:
         if not self.api_key:
             self.api_key = os.getenv("SILICONFLOW_API_KEY")
+        env_model = os.getenv("PYWEIXIN_SILICONFLOW_MODEL", "").strip()
+        if env_model:
+            self.model = env_model
         self.base_url = self.base_url.rstrip("/")
 
     @staticmethod
@@ -378,6 +459,98 @@ class SiliconFlowOpenAIProvider:
             confidence=0.6,
             source=f"ai:siliconflow:{self.model}",
             extra={"model": self.model},
+        )
+
+
+@dataclass(slots=True)
+class AliyunDashScopeOpenAIProvider(SiliconFlowOpenAIProvider):
+    """
+    Aliyun DashScope / Bailian OpenAI-compatible chat/completions provider.
+
+    Default model is qwen3.5-plus. This follows DashScope's OpenAI-compatible
+    endpoint and reuses the same payload structure as other OpenAI-style VLMs.
+    """
+
+    api_key: str | None = None
+    model: str = "qwen3.5-plus"
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    max_tokens: int = 32
+    temperature: float = 0.0
+    top_p: float = 0.6
+    timeout_sec: float = 8.0
+    enable_thinking: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.api_key:
+            self.api_key = (
+                os.getenv("DASHSCOPE_API_KEY")
+                or os.getenv("ALIYUN_BAILIAN_API_KEY")
+                or os.getenv("BAILIAN_API_KEY")
+            )
+        self.base_url = self.base_url.rstrip("/")
+        env_model = (
+            os.getenv("PYWEIXIN_DASHSCOPE_MODEL", "").strip()
+            or os.getenv("PYWEIXIN_ALIYUN_MODEL", "").strip()
+        )
+        if env_model:
+            self.model = env_model
+        try:
+            env_max_tokens = int(os.getenv("PYWEIXIN_DASHSCOPE_MAX_TOKENS", str(self.max_tokens)))
+            self.max_tokens = min(128, max(8, env_max_tokens))
+        except Exception:
+            pass
+        try:
+            env_temp = float(os.getenv("PYWEIXIN_DASHSCOPE_TEMPERATURE", str(self.temperature)))
+            self.temperature = min(1.5, max(0.0, env_temp))
+        except Exception:
+            pass
+        try:
+            env_top_p = float(os.getenv("PYWEIXIN_DASHSCOPE_TOP_P", str(self.top_p)))
+            self.top_p = min(1.0, max(0.1, env_top_p))
+        except Exception:
+            pass
+        try:
+            env_timeout = float(os.getenv("PYWEIXIN_DASHSCOPE_TIMEOUT_SEC", str(self.timeout_sec)))
+            self.timeout_sec = min(20.0, max(2.0, env_timeout))
+        except Exception:
+            pass
+        env_enable_thinking = os.getenv("PYWEIXIN_DASHSCOPE_ENABLE_THINKING", "").strip().lower()
+        if env_enable_thinking in {"1", "true", "yes", "on"}:
+            self.enable_thinking = True
+        elif env_enable_thinking in {"0", "false", "no", "off"}:
+            self.enable_thinking = False
+
+    def _build_payload(
+        self,
+        question_text: str,
+        image_paths: list[str],
+        templates_hint: list[QuestionTemplate] | None = None,
+    ) -> dict:
+        payload = SiliconFlowOpenAIProvider._build_payload(self, question_text, image_paths, templates_hint)
+        # Qwen3 mixed-thinking models support explicit thinking toggle.
+        payload["enable_thinking"] = bool(self.enable_thinking)
+        return payload
+
+    def answer_from_text_and_images(
+        self,
+        question_text: str,
+        image_paths: list[str],
+        templates_hint: list[QuestionTemplate] | None = None,
+    ) -> AnswerResult | None:
+        result = SiliconFlowOpenAIProvider.answer_from_text_and_images(
+            self,
+            question_text,
+            image_paths,
+            templates_hint,
+        )
+        if result is None:
+            return None
+        return AnswerResult(
+            answer=result.answer,
+            confidence=result.confidence,
+            source=f"ai:aliyun:chat:{self.model}",
+            latency_ms=result.latency_ms,
+            extra={"model": self.model, **dict(result.extra or {})},
         )
 
 
@@ -622,6 +795,34 @@ class ArkChatProvider:
             source=f"ai:ark:chat:{self.model}",
             extra={"model": self.model},
         )
+
+
+def build_default_ai_provider(
+    provider: str | None = None,
+    config_dir: str | None = None,
+) -> AIAnswerProvider:
+    provider_name = normalize_ai_provider_name(provider)
+    if provider_name == "ark":
+        api_key = _resolve_api_key(["ARK_API_KEY"], config_dir=config_dir)
+        if not api_key:
+            raise ValueError("Missing API key. Set ARK_API_KEY or configure config/.local_env.bat / .local_secrets.json.")
+        return ArkChatProvider(api_key=api_key)
+    if provider_name == "aliyun":
+        api_key = _resolve_api_key(
+            ["DASHSCOPE_API_KEY", "ALIYUN_BAILIAN_API_KEY", "BAILIAN_API_KEY"],
+            config_dir=config_dir,
+        )
+        if not api_key:
+            raise ValueError(
+                "Missing API key. Set DASHSCOPE_API_KEY or configure config/.local_env.bat / .local_secrets.json."
+            )
+        return AliyunDashScopeOpenAIProvider(api_key=api_key)
+    api_key = _resolve_api_key(["SILICONFLOW_API_KEY"], config_dir=config_dir)
+    if not api_key:
+        raise ValueError(
+            "Missing API key. Set SILICONFLOW_API_KEY or configure config/.local_env.bat / .local_secrets.json."
+        )
+    return SiliconFlowOpenAIProvider(api_key=api_key)
 
 
 @dataclass(slots=True)

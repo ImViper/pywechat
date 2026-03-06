@@ -22,6 +22,7 @@ python 启动抢答.py
 按提示输入：
 - 好友名（如：`小蔡`）
 - 预计发圈时间（`HH:MM`）
+- 抢答模式（标准抢答 / 拼车数数题）
 - 其他选填项可直接回车
 
 脚本实际调用：`examples/run_feed_multi_comment_listener.py`。
@@ -34,8 +35,10 @@ python 启动抢答.py
 - `examples/run_feed_multi_comment_listener.py` 默认加载 profile：`listener`
 
 ### 3.1 稳定优先参数
+- `PYWEIXIN_HOOK_ENABLED=0`（默认不启用 Hook）
 - `PYWEIXIN_HOOK_BATCH_MODE=fast_first_batch`
 - `PYWEIXIN_FAST_FIRST_PRE_HOOK=0`
+- `PYWEIXIN_ANSWER_MODE=standard`
 - `PYWEIXIN_FIRST_ANSWER_MODE=ai_ocr_only`（关闭 NumberGuess/TemplateMatch 首答）
 - `PYWEIXIN_DISABLE_OCR=1`（默认纯 AI）
 - `PYWEIXIN_FAST_FIRST_DEFER_IMAGES=1`
@@ -52,12 +55,19 @@ python 启动抢答.py
 
 ### 3.3 AI/OCR 参数
 - AI（默认生效）：
+  - `PYWEIXIN_AI_PROVIDER=ark`（可切到 `aliyun`）
   - `PYWEIXIN_ARK_MODEL=doubao-seed-1-8-251228`
   - `PYWEIXIN_ARK_IMAGE_DETAIL=high`
   - `PYWEIXIN_ARK_MAX_TOKENS=16`
   - `PYWEIXIN_ARK_TEMPERATURE=0.0`
   - `PYWEIXIN_ARK_TOP_P=0.6`
   - `PYWEIXIN_ARK_TIMEOUT_SEC=8.0`
+  - `PYWEIXIN_DASHSCOPE_MODEL=qwen3.5-plus`（当前默认，仅 `PYWEIXIN_AI_PROVIDER=aliyun` 时生效）
+  - `PYWEIXIN_DASHSCOPE_ENABLE_THINKING=0`
+  - `PYWEIXIN_DASHSCOPE_MAX_TOKENS=32`
+  - `PYWEIXIN_DASHSCOPE_TEMPERATURE=0.0`
+  - `PYWEIXIN_DASHSCOPE_TOP_P=0.6`
+  - `PYWEIXIN_DASHSCOPE_TIMEOUT_SEC=8.0`
   - `PYWEIXIN_AI_IMAGE_OPTIMIZE=1`
   - `PYWEIXIN_AI_IMAGE_MAX_SIDE=1280`
   - `PYWEIXIN_AI_IMAGE_JPEG_QUALITY=90`
@@ -75,7 +85,33 @@ python 启动抢答.py
 2. 发现目标帖后先提图，AI 识别并返回首条答案（不再走预制首答）。
 3. 默认仅 `AICommentSource`；如手动开启 OCR，再进入 `OCR+AI` 并行模式。
 4. 首条评论优先走 UI 发送（更稳）。
-5. 后续答案走 Hook batch（piggyback）；Hook 不可用时自动回退 UI。
+5. 默认走纯 UI 发送；仅在你显式启用 Hook 时才走 Hook batch。
+
+## 4.1 当前阿里默认模型
+
+当前默认通过 DashScope / 百炼 OpenAI 兼容接口使用 `qwen3.5-plus`。
+
+模式切换约定：
+
+- 标准抢答：`PYWEIXIN_ANSWER_MODE=standard`
+- 拼车数数题：`PYWEIXIN_ANSWER_MODE=count_suffix`，并配合 `--suffix 男` 这类后缀
+
+- API Key：
+  - 环境变量：`DASHSCOPE_API_KEY`
+  - 或 `config/.local_env.bat`
+  - 或 `config/.local_secrets.json`
+- Provider 切换：
+  - 设置 `PYWEIXIN_AI_PROVIDER=aliyun`
+- 模型：
+  - 默认：`PYWEIXIN_DASHSCOPE_MODEL=qwen3.5-plus`
+  - 如需固定快照，可改成具体日期后缀版本
+  - 备选：`qwen3-vl-plus`、`qwen3-vl-flash`
+
+推荐做法：
+
+- 直接运行示例脚本并传 `--runtime-profile aliyun_qwen3_vl_plus`
+- 或一键脚本前设置 `PYWEIXIN_RUNTIME_PROFILE=aliyun_qwen3_vl_plus`
+- 或手动把 `startup/listener` profile 中的 `PYWEIXIN_AI_PROVIDER` 改成 `aliyun`
 
 ## 5. Hook 当前定位
 

@@ -45,6 +45,9 @@ local_workspace/
 /test_ai_answer.py
 /test_ocr_benchmark.py
 /test_ocr_count.py
+/tmp/
+/deploy_*.zip
+/patch_*.zip
 
 # Hook DLL build artifacts
 hook/build/

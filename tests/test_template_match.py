@@ -9,6 +9,7 @@ import queue
 import time
 
 from pyweixin.rush_callback_multi import (
+    AICommentSource,
     CannedCommentSource,
     TemplateMatchCommentSource,
     NumberGuessCommentSource,
@@ -83,6 +84,7 @@ def test_template_match_suffix():
     print("\n=== Test: suffix mode ===")
     source = TemplateMatchCommentSource(
         known_answers={"楚凭阑": "5楚凭阑"},
+        answer_mode="count_suffix",
         answer_suffix="男",
         enable_math=True,
     )
@@ -98,6 +100,22 @@ def test_template_match_suffix():
     assert result == "7男", f"Expected '7男', got {result!r}"
 
     print("  [OK] suffix mode passed")
+
+
+def test_template_match_standard_mode_ignores_suffix():
+    """标准模式下即便传了 suffix，也保留标准答案。"""
+    print("\n=== Test: standard mode ignores suffix ===")
+    source = TemplateMatchCommentSource(
+        known_answers={"楚凭阑": "5楚凭阑"},
+        answer_mode="standard",
+        answer_suffix="男",
+        enable_math=False,
+    )
+
+    result = source.generate("下方图片中有多少个楚凭阑？", [])
+    print(f"  楚凭阑 + standard + suffix=男 → {result!r}")
+    assert result == "5楚凭阑", f"Expected '5楚凭阑', got {result!r}"
+    print("  [OK] standard mode ignores suffix passed")
 
 
 def test_template_match_no_match():
@@ -140,6 +158,58 @@ def test_number_guess_skip():
     assert "5男" not in result
     assert len(result) == 4
     print("  [OK] number guess skip passed")
+
+
+def test_ai_comment_source_suffix_mode():
+    """AI 在 suffix 模式下只保留数字并统一拼后缀。"""
+    print("\n=== Test: AI suffix mode ===")
+
+    class FakeAIProvider:
+        def __init__(self):
+            self.last_question_text = ""
+
+        def answer_from_text_and_images(self, question_text, image_paths, templates_hint=None):
+            _ = (image_paths, templates_hint)
+            self.last_question_text = question_text
+            return "5楚凭阑"
+
+    provider = FakeAIProvider()
+    source = AICommentSource(provider, answer_mode="count_suffix", answer_suffix="男")
+    result = source.generate("图中共有几位楚凭阑角色？", ["dummy.png"])
+
+    print(f"  AI result: {result!r}")
+    assert result == "5男", f"Expected '5男', got {result!r}"
+    meta = source.get_last_metadata()
+    assert meta.get("model") == ""
+    assert meta.get("provider")
+    assert meta.get("latency_ms") is not None
+    assert meta.get("answer") == "5男"
+    assert "拼车模式补充要求" in provider.last_question_text
+    assert "多少个葫芦" in provider.last_question_text
+    print("  [OK] AI suffix mode passed")
+
+
+def test_ai_comment_source_standard_mode_ignores_suffix():
+    """标准模式下 AI 不应被强制转成 数字+suffix。"""
+    print("\n=== Test: AI standard mode ignores suffix ===")
+
+    class FakeAIProvider:
+        def __init__(self):
+            self.last_question_text = ""
+
+        def answer_from_text_and_images(self, question_text, image_paths, templates_hint=None):
+            _ = (image_paths, templates_hint)
+            self.last_question_text = question_text
+            return "5楚凭阑"
+
+    provider = FakeAIProvider()
+    source = AICommentSource(provider, answer_mode="standard", answer_suffix="男")
+    result = source.generate("图中共有几位楚凭阑角色？", ["dummy.png"])
+
+    print(f"  AI result: {result!r}")
+    assert result == "5楚凭阑", f"Expected '5楚凭阑', got {result!r}"
+    assert "拼车模式补充要求" not in provider.last_question_text
+    print("  [OK] AI standard mode ignores suffix passed")
 
 
 def test_priority_queue_ordering():
@@ -216,6 +286,40 @@ def test_priority_in_multi_source_callback():
     assert "6男" in results
 
     print("  [OK] priority in multi-source callback passed")
+
+
+def test_multi_source_queue_exposes_ai_metadata():
+    """流式队列应暴露 AI provider/model/latency 元信息。"""
+    print("\n=== Test: queue ai metadata ===")
+
+    class FakeAIProvider:
+        model = "qwen3.5-plus"
+
+        def answer_from_text_and_images(self, question_text, image_paths, templates_hint=None):
+            _ = (question_text, image_paths, templates_hint)
+            return "6女"
+
+    callback = create_multi_source_streaming_callback(
+        sources=[AICommentSource(FakeAIProvider(), answer_mode="count_suffix", answer_suffix="女")],
+        max_comments=3,
+        dedup=True,
+        verbose=True,
+    )
+
+    answer_queue = callback("图中共有几位提灯笼的人物？", ["dummy.png"])
+    results = []
+    while True:
+        ans = answer_queue.get(timeout=1.0)
+        if ans is None:
+            break
+        results.append(ans)
+
+    print(f"  Results: {results}")
+    print(f"  AI meta: {answer_queue.ai_metadata}")
+    assert results == ["6女"]
+    assert answer_queue.ai_metadata.get("model") == "qwen3.5-plus"
+    assert answer_queue.ai_metadata.get("latency_ms") is not None
+    print("  [OK] queue ai metadata passed")
 
 
 def test_load_known_answers_file():

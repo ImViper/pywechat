@@ -7,6 +7,61 @@ import re
 import time
 from typing import Any
 
+ANSWER_MODE_STANDARD = "standard"
+ANSWER_MODE_COUNT_SUFFIX = "count_suffix"
+
+
+def _normalize_answer_mode(answer_mode: str | None) -> str:
+    mode = str(answer_mode or ANSWER_MODE_STANDARD).strip().lower()
+    if mode in {"count_suffix", "suffix", "count_only"}:
+        return ANSWER_MODE_COUNT_SUFFIX
+    return ANSWER_MODE_STANDARD
+
+
+def _is_count_suffix_mode(answer_mode: str | None, answer_suffix: str | None) -> bool:
+    return _normalize_answer_mode(answer_mode) == ANSWER_MODE_COUNT_SUFFIX and bool(answer_suffix)
+
+
+def _provider_name(ai_provider: Any) -> str:
+    return str(
+        getattr(ai_provider, "name", "")
+        or getattr(ai_provider, "__class__", type(ai_provider)).__name__
+    )
+
+
+def _provider_model(ai_provider: Any) -> str:
+    return str(getattr(ai_provider, "model", "") or "")
+
+
+def _set_last_ai_metadata(
+    ai_provider: Any,
+    *,
+    latency_ms: int,
+    answer: str = "",
+    raw_answer: str = "",
+    ok: bool = False,
+    error: str = "",
+) -> dict[str, Any]:
+    meta = {
+        "provider": _provider_name(ai_provider),
+        "model": _provider_model(ai_provider),
+        "latency_ms": int(latency_ms),
+        "answer": str(answer or ""),
+        "raw_answer": str(raw_answer or ""),
+        "ok": bool(ok),
+        "error": str(error or ""),
+    }
+    try:
+        setattr(ai_provider, "_pyweixin_last_ai_metadata", meta)
+    except Exception:
+        pass
+    return meta
+
+
+def get_last_ai_metadata(ai_provider: Any) -> dict[str, Any]:
+    meta = getattr(ai_provider, "_pyweixin_last_ai_metadata", None)
+    return dict(meta) if isinstance(meta, dict) else {}
+
 
 def try_ocr_count(
     content: str,
@@ -116,11 +171,48 @@ def try_ocr_count(
     return None
 
 
+def _extract_first_number(text: str) -> str:
+    if not text:
+        return ""
+    match = re.search(r"(\d+)", text)
+    if not match:
+        return ""
+    return match.group(1)
+
+
+def _apply_answer_suffix(answer: str, answer_suffix: str | None) -> str:
+    if not answer_suffix:
+        return answer.strip()
+    number = _extract_first_number(answer)
+    if not number:
+        return ""
+    return f"{number}{answer_suffix}"
+
+
+def _build_ai_question_text(
+    content: str,
+    answer_mode: str | None,
+    answer_suffix: str | None,
+) -> str:
+    if not _is_count_suffix_mode(answer_mode, answer_suffix):
+        return content
+    return (
+        f"{content}\n\n"
+        "拼车模式补充要求：\n"
+        "1. 这是数数题时，只输出最终阿拉伯数字。\n"
+        "2. 不要角色名，不要对象名，不要单位，不要解释。\n"
+        "3. 例如“有多少个葫芦”“多少把剑”“多少个人”都只输出数字。\n"
+        "4. 如果无法判断，输出 SKIP。"
+    )
+
+
 def try_ai_answer(
     content: str,
     image_paths: list[str],
     ai_provider: Any,
     verbose: bool = True,
+    answer_mode: str = ANSWER_MODE_STANDARD,
+    answer_suffix: str | None = None,
 ) -> str | None:
     """
     Call AI provider to get answer.
@@ -129,23 +221,27 @@ def try_ai_answer(
     """
     if ai_provider is None:
         return None
-        
+
+    ai_question_text = _build_ai_question_text(content, answer_mode, answer_suffix)
     start_time = time.time()
     try:
-        result = ai_provider.answer_from_text_and_images(content, image_paths, [])
+        result = ai_provider.answer_from_text_and_images(ai_question_text, image_paths, [])
         elapsed = int((time.time() - start_time) * 1000)
         if result is None:
+            _set_last_ai_metadata(ai_provider, latency_ms=elapsed, ok=False)
             if verbose:
                 print(f"[AI] no answer ({elapsed}ms)")
             return None
 
         answer = ""
+        raw_answer = ""
         if hasattr(result, "answer") and result.answer:
             answer = result.answer
         elif isinstance(result, dict) and result.get("answer"):
             answer = str(result.get("answer", ""))
         elif isinstance(result, str):
             answer = result
+        raw_answer = str(answer).strip()
 
         answer = str(answer).strip()
         # Handle malformed AnswerResult string representation
@@ -156,17 +252,60 @@ def try_ai_answer(
                 if match:
                     answer = match.group(1).strip()
                 else:
+                    _set_last_ai_metadata(
+                        ai_provider,
+                        latency_ms=elapsed,
+                        answer="",
+                        raw_answer=raw_answer,
+                        ok=False,
+                    )
                     return None
                 break
 
+        if _is_count_suffix_mode(answer_mode, answer_suffix):
+            normalized = _apply_answer_suffix(answer, answer_suffix)
+            if not normalized:
+                _set_last_ai_metadata(
+                    ai_provider,
+                    latency_ms=elapsed,
+                    answer="",
+                    raw_answer=raw_answer or answer,
+                    ok=False,
+                )
+                if verbose:
+                    print(f"[AI] no numeric answer for suffix mode ({elapsed}ms)")
+                return None
+            answer = normalized
+
         if answer:
+            _set_last_ai_metadata(
+                ai_provider,
+                latency_ms=elapsed,
+                answer=answer,
+                raw_answer=raw_answer or answer,
+                ok=True,
+            )
             if verbose:
                 print(f"[AI] answer={answer} ({elapsed}ms)")
             return answer
+        _set_last_ai_metadata(
+            ai_provider,
+            latency_ms=elapsed,
+            answer="",
+            raw_answer=raw_answer,
+            ok=False,
+        )
         if verbose:
             print(f"[AI] empty answer ({elapsed}ms)")
         return None
     except Exception as exc:
+        elapsed = int((time.time() - start_time) * 1000)
+        _set_last_ai_metadata(
+            ai_provider,
+            latency_ms=elapsed,
+            ok=False,
+            error=str(exc),
+        )
         if verbose:
             print(f"[AI] failed: {exc}")
         return None
@@ -178,6 +317,8 @@ def create_ai_callback(
     compare_mode: bool = False,
     verbose: bool = True,
     known_keywords: list[str] | None = None,
+    answer_mode: str = ANSWER_MODE_STANDARD,
+    answer_suffix: str | None = None,
 ):
     """
     Create the standard ai_callback function used in production.
@@ -207,7 +348,14 @@ def create_ai_callback(
             if verbose:
                 print("[recognize] OCR hit, compare mode enabled, continue with AI")
 
-        ai_answer = try_ai_answer(content, image_paths, ai_provider, verbose=verbose)
+        ai_answer = try_ai_answer(
+            content,
+            image_paths,
+            ai_provider,
+            verbose=verbose,
+            answer_mode=answer_mode,
+            answer_suffix=answer_suffix,
+        )
         if ocr_answer:
             elapsed = int((time.time() - callback_start) * 1000)
             if ai_answer:
@@ -249,6 +397,8 @@ def create_concurrent_callback(
     ai_provider: Any = None,
     verbose: bool = True,
     known_keywords: list[str] | None = None,
+    answer_mode: str = ANSWER_MODE_STANDARD,
+    answer_suffix: str | None = None,
 ):
     """
     Create a concurrent callback that runs OCR and AI in parallel.
@@ -282,7 +432,14 @@ def create_concurrent_callback(
         
         def run_ai():
             start = time.time()
-            answer = try_ai_answer(content, image_paths, ai_provider, verbose=verbose)
+            answer = try_ai_answer(
+                content,
+                image_paths,
+                ai_provider,
+                verbose=verbose,
+                answer_mode=answer_mode,
+                answer_suffix=answer_suffix,
+            )
             elapsed = int((time.time() - start) * 1000)
             if answer:
                 return AnswerWithTiming(answer=answer, source="ai", elapsed_ms=elapsed)
@@ -335,6 +492,7 @@ def create_streaming_callback(
     ai_provider: Any = None,
     verbose: bool = True,
     known_keywords: list[str] | None = None,
+    answer_mode: str = ANSWER_MODE_STANDARD,
     answer_suffix: str | None = None,
 ):
     """
@@ -350,13 +508,15 @@ def create_streaming_callback(
 
     def streaming_callback(content: str, image_paths: list[str]) -> queue.Queue:
         answer_queue: queue.Queue = queue.Queue()
+        setattr(answer_queue, "ai_metadata", {})
         if verbose:
             print(f"[streaming] start text_len={len(content)} images={len(image_paths)}")
         callback_start = time.time()
         seen: set[str] = set()
+        count_suffix_mode = _is_count_suffix_mode(answer_mode, answer_suffix)
 
         def push(answer: str, source: str, elapsed: int):
-            if answer_suffix:
+            if count_suffix_mode:
                 m = re.match(r'^(\d+)', answer)
                 if m:
                     answer = f"{m.group(1)}{answer_suffix}"
@@ -377,7 +537,15 @@ def create_streaming_callback(
 
         def run_ai():
             start = time.time()
-            answer = try_ai_answer(content, image_paths, ai_provider, verbose=verbose)
+            answer = try_ai_answer(
+                content,
+                image_paths,
+                ai_provider,
+                verbose=verbose,
+                answer_mode=answer_mode,
+                answer_suffix=answer_suffix,
+            )
+            setattr(answer_queue, "ai_metadata", get_last_ai_metadata(ai_provider))
             elapsed = int((time.time() - start) * 1000)
             if answer:
                 push(answer, "ai", elapsed)
