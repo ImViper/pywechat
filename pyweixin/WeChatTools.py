@@ -257,7 +257,7 @@ class Tools():
         return msg_folder
 
     @staticmethod
-    def where_db_folder(open_folder:bool=False)->str:
+    def where_db_storage(open_folder:bool=False)->str:
         '''
         该方法用来获取微信db_storage文件夹路径
         使用时微信必须登录,否则无法获取到完整路径
@@ -373,7 +373,6 @@ class Tools():
             if '--lang=en' in cmd_str:lang='English'
         return lang
 
-
     @staticmethod
     def cancel_pin(main_window:WindowSpecification):
         '''
@@ -430,14 +429,17 @@ class Tools():
         return scrollable
     
     @staticmethod
-    def is_my_bubble(main_window:WindowSpecification,listitem:ListItemWrapper,)->bool:
-        #edit_area:EditWrapper
-        '''右键左侧消息区域检测最新的一条消息(bubble)是否是由本人发送'''
-        rect=listitem.rectangle()
-        mouse.right_click(coords=(rect.left+100,rect.mid_point().y))
-        copy_menu_item=main_window.child_window(**MenuItems.CopyMenuItem)        
-        if copy_menu_item.exists(timeout=0.1):return False
-        return True
+    def is_my_bubble(main_window:WindowSpecification,listitem:ListItemWrapper,edit_area:EditWrapper)->bool:
+        '''右键左侧头像区域查看是否有拍一拍出现检测最新的一条消息是否是由本人发送'''
+        item_rect=listitem.rectangle()
+        edit_rect=edit_area.rectangle()
+        right_click_pos=(item_rect.left+40,item_rect.top+20)
+        click_pos=(edit_rect.left+10,edit_rect.mid_point().y)
+        mouse.right_click(coords=right_click_pos)
+        tickle=main_window.child_window(**MenuItems.TickleMenuItem)
+        my_bubble=tickle.exists(timeout=0.1)
+        mouse.click(coords=click_pos)       
+        return not my_bubble
     
     @staticmethod
     def is_group_chat(main_window:WindowSpecification)->bool:
@@ -477,7 +479,8 @@ class Tools():
         '''
         rectangle=chat_history_list.rectangle()
         mouse.move(coords=(rectangle.mid_point().x,rectangle.mid_point().y))
-        chat_history_list.type_keys('{PGUP}')
+        chat_history_list.type_keys('{HOME}')
+        
         
     @staticmethod
     def get_next_item(listview:ListViewWrapper,listitem:ListItemWrapper)->(ListItemWrapper|None):
@@ -702,14 +705,15 @@ class Navigator():
         return main_window
     
     @staticmethod
-    def capture_Login_QRCode(target_folder:str=None,language:str=None):
+    def capture_Login_QRCode(image_path:str)->bool:
         '''
         该方法用来保存微信登录二维码
+        Args:
+            image_path:登录二维码的图片路径,xxx.png
+        Returns:
+            is_saved:图片是否保存到了本地
         '''
-        if target_folder is not None and not os.path.isdir(target_folder):
-            raise NotFolderError(f'所选路径不是文件夹!无法保存登录二维码,请重新选择!')
-        if target_folder is None:
-            target_folder=os.getcwd()
+        is_saved=False
         is_running=Tools.is_weixin_running()
         if not is_running:#微信不在运行,主界面看不到窗口，需要先启动
             exe_path=Tools.where_weixin()
@@ -717,8 +721,8 @@ class Navigator():
             time.sleep(3)
         login_window=desktop.window(**Login_window.LoginWindow)
         if not login_window.exists(timeout=4):
-            print('无法连接到登录窗口,可能是微信正在运行也可能是语言未设定,请退出登录重试!')
-            return 
+            print('无法连接到登录窗口,可能是微信正在运行,请退出登录重试!')
+            return is_saved
         login_window.restore()
         switch_texts=[{'control_type':'Text','title':'切换账号'},{'control_type':'Text','title':'Switch Account'},{'control_type':'Text','title':'切換賬號'}]
         for element in switch_texts:#挨个试一遍
@@ -727,10 +731,10 @@ class Navigator():
                 switch_text.click_input()
         time.sleep(2)#等待切换到扫码界面
         code_image=login_window.capture_as_image()
-        image_path=os.path.join(target_folder,'Login_QRCode.png')
         code_image.save(image_path)
+        is_saved=True
         print(f'二维码5分钟内有效,请尽快扫码登录,注意不要关闭登录窗口,否则需要重新获取！')
-        return image_path
+        return is_saved
 
     @staticmethod
     def find_friend_in_SessionList(friend:str,is_maximize:bool=None,search_pages:int=None)->tuple[bool,WindowSpecification]:
@@ -743,7 +747,7 @@ class Navigator():
         Returns:
             (is_find,main_window):is_find:是否在会话列表中找到了好友,main_window:微信主界面
         '''
-        def select_in_messageList(friend):
+        def select_in_sessionList(friend):
             '''
             用来返回会话列表中automation_id为friend的ListItem项是否为最后一项
             最后一项就不点了,直接返回is_find=False顶部搜索
@@ -785,7 +789,7 @@ class Navigator():
                 session_list.type_keys("{HOME}")
                 for _ in range(search_pages):
                     time.sleep(0.1)
-                    friend_button,is_last=select_in_messageList(friend)
+                    friend_button,is_last=select_in_sessionList(friend)
                     if friend_button is not None:
                         if not is_last:
                             friend_button.click_input()
@@ -1325,15 +1329,18 @@ class Navigator():
         return chat_history_window,main_window
 
     @staticmethod
-    def open_chat_history(friend:str,TabItem:str=None,search_pages:int=None,is_maximize:bool=None,close_weixin:bool=None)->WindowSpecification:
+    def open_chat_history(friend:str,TabItem:Literal['文件','图片与视频','链接','音乐与音频','小程序','视频号','日期','群成员']=None,
+        search_pages:int=None,is_maximize:bool=None,close_weixin:bool=None)->tuple[WindowSpecification,bool]:
         '''
         该方法用于打开好友聊天记录界面
         Args:
             friend:好友备注名称,需提供完整名称
-            TabItem:聊天记录界面打开的具体分区{'文件','图片与视频','链接','音乐与音频','小程序','视频号','日期'}中的任意一个
+            TabItem:聊天记录界面打开的具体分区{'文件','图片与视频','链接','音乐与音频','小程序','视频号','日期','群成员'}中的任意一个
             search_pages:在会话列表中查询查找好友时滚动列表的次数,默认为5,一次可查询5-12人,当search_pages为0时,直接从顶部搜索栏搜索好友信息打开聊天界面
             is_maximize:微信界面是否全屏,默认不全屏
             close_weixin:任务结束后是否关闭微信,默认关闭
+        Returns:
+            (chat_history_window,is_group):聊天记录窗口,聊天是否为群聊
         '''
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
@@ -1343,29 +1350,35 @@ class Navigator():
             search_pages=GlobalConfig.search_pages
         #增加窗口名称,避免出现打开多个聊天窗口时出现ElementAmbigousError
         ChatHistoryWindow=Independent_window.ChatHistoryWindow
-        if GlobalConfig.language=='简体中文':title_re=rf'与“{friend}”'
-        if GlobalConfig.language=='English':title_re=rf'Chat History with "{friend}"'
-        if GlobalConfig.language=='繁體中文':title_re=rf'與「{friend}」'
-        ChatHistoryWindow['title_re']=title_re
         main_window=Navigator.open_dialog_window(friend=friend,is_maximize=is_maximize,search_pages=search_pages)
         chat_history_button=main_window.child_window(**Buttons.ChatHistoryButton)
         if not chat_history_button.exists(timeout=0.3):
             main_window.close()
             raise NotFriendError(f'非正常好友或群聊！无法打开该好友或群聊的聊天记录界面')
-        chat_history_button.click_input()       
+        is_group_chat=Tools.is_group_chat(main_window)
+        if not is_group_chat:
+            if GlobalConfig.language=='简体中文':title_re=rf'与“{friend}”'
+            if GlobalConfig.language=='English':title_re=rf'Chat History with "{friend}"'
+            if GlobalConfig.language=='繁體中文':title_re=rf'與「{friend}」'
+        else:
+            if GlobalConfig.language=='简体中文':title_re=rf'“{friend}”的'
+            if GlobalConfig.language=='English':title_re=rf'Chat History for "{friend}"'
+            if GlobalConfig.language=='繁體中文':title_re=rf'「{friend}」的'
+        ChatHistoryWindow['title_re']=title_re
+        ChatHistoryWindow['found_index']=0
+        chat_history_button.click_input() 
         chat_history_window=Tools.move_window_to_center(ChatHistoryWindow)
         tab_button=chat_history_window.child_window(control_type='Button',class_name="mmui::XMouseEventView")
         if tab_button.exists(timeout=0.2):
             tab_button.click_input()
-        if TabItem:
+        if isinstance(TabItem,str):
             tabItems={'文件':TabItems.FileTabItem,'图片与视频':TabItems.PhotoAndVideoTabItem,'链接':TabItems.LinkTabItem,
             '音乐与音频':TabItems.MusicTabItem,'小程序':TabItems.MiniProgramTabItem,'视频号':TabItems.ChannelTabItem,'日期':TabItems.DateTabItem}
             item=tabItems.get(TabItem)
-            if item:
-                chat_history_window.child_window(**item).click_input()
+            if item is not None:chat_history_window.child_window(**item).click_input()    
         if close_weixin:
             main_window.close()
-        return chat_history_window
+        return chat_history_window,is_group_chat
 
     @staticmethod
     def open_add_friend_panel(is_maximize:bool=None)->tuple[WindowSpecification,WindowSpecification]:

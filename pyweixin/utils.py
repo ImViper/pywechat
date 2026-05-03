@@ -7,10 +7,11 @@ import soundfile as sf
 import sounddevice as sd
 from packaging import version
 from pywinauto import WindowSpecification,Desktop,mouse
+from pywinauto.controls.uia_controls import ListItemWrapper,ListViewWrapper
 from .Config import GlobalConfig
 from .WeChatTools import Navigator,Tools
 from .WinSettings import SystemSettings
-from .Uielements import Main_window,SideBar,Buttons,Edits,Lists,Windows,Texts
+from .Uielements import Main_window,SideBar,Buttons,Edits,Lists,Windows,Texts,MenuItems
 #######################################################################################
 pyautogui.FAILSAFE=False#防止鼠标在屏幕边缘处造成的误触
 desktop=Desktop(backend='uia')#windows桌面WindowSpecification示例
@@ -685,6 +686,83 @@ def scan_for_new_messages(main_window:WindowSpecification=None,delay:float=0.3,i
     if close_weixin:
         main_window.close()
     return newMessages_dict
+
+def traverse_chat_history_list(chat_history_window:WindowSpecification,select:bool,number:int):
+    '''该函数用于遍历聊天记录列表获取指定数量文本
+    Args:
+        chat_history_window:聊天记录窗口
+        select:是否在选中的状态下遍历
+        number:指定数量条聊天记录
+    Returns:
+        texts:指定数量的聊天记录文本
+    '''
+    texts=[]
+    runtime_ids=[]
+    recorded_num=0
+    control_type='CheckBox' if select else 'ListItem'
+    multiselect_item=chat_history_window.child_window(**MenuItems.SelectMenuItem)
+    chat_history_list=chat_history_window.child_window(**Lists.ChatHistoryList)
+    if select:
+        first_item=[listitem for listitem in chat_history_list.children(control_type='ListItem') if listitem.class_name()!='mmui::ChatItemView'][0]
+        right_clik_pos=first_item.rectangle().left+120,first_item.rectangle().top+50
+        mouse.right_click(coords=right_clik_pos)
+        multiselect_item.click_input()
+        first_item=[listitem for listitem in chat_history_list.children(control_type='CheckBox') if listitem.class_name()!='mmui::ChatItemView'][0]
+        mouse.click(coords=right_clik_pos)
+    while recorded_num<number:
+        selected=[item for item in chat_history_list.children(control_type=control_type) if item.has_keyboard_focus()]
+        if selected and selected[0].class_name()!='mmui::ChatItemView':
+            runtime_ids.append(selected[0].element_info.runtime_id)
+            #同一个runtime_id挨着重复出现就说明到底部了无法继续下滑
+            if len(runtime_ids)>2 and runtime_ids[-1]==runtime_ids[-2]:
+                break
+            texts.append(selected[0].window_text())
+            recorded_num+=1
+        pyautogui.press('down',presses=1,_pause=False)
+    if select:pyautogui.press('esc')
+    chat_history_list.type_keys('{HOME}')
+    return texts
+
+def traverse_chatList(main_window:WindowSpecification,select:bool,number:int):
+    '''该函数用于遍历聊天窗口内的消息列表获取指定数量文本
+    Args:
+        main_window:微信主界面窗口
+        select:是否在选中的状态下遍历
+        number:指定数量条聊天记录
+    Returns:
+        texts:指定数量的聊天记录文本
+    '''
+    texts=[]
+    runtime_ids=[]
+    recorded_num=0
+    control_type='CheckBox' if select else 'ListItem'
+    multiselect_item=main_window.child_window(**MenuItems.SelectMenuItem)
+    chatList=main_window.child_window(**Lists.FriendChatList)
+    last_item=[listitem for listitem in chatList.children(control_type='ListItem') if listitem.class_name()!='mmui::ChatItemView'][-1]
+    #Tools.activate_chatList(chatList)
+    if select:
+        right_clik_pos=last_item.rectangle().left+120,last_item.rectangle().bottom-40
+        mouse.right_click(coords=right_clik_pos)
+        if not multiselect_item.exists(timeout=0.2):
+            right_clik_pos=last_item.rectangle().right-120,last_item.rectangle().bottom-40
+            mouse.right_click(coords=right_clik_pos)
+        multiselect_item.click_input()
+        last_item=[listitem for listitem in chatList.children(control_type='CheckBox') if listitem.class_name()!='mmui::ChatItemView'][-1]
+        mouse.click(coords=right_clik_pos)
+        texts.append(last_item.window_text())
+    while recorded_num<number:
+        selected=[item for item in chatList.children(control_type=control_type) if item.has_keyboard_focus()]
+        if selected and selected[0].class_name()!='mmui::ChatItemView':
+            runtime_ids.append(selected[0].element_info.runtime_id)
+            #同一个runtime_id挨着重复出现就说明到底部了无法继续下滑
+            if len(runtime_ids)>2 and runtime_ids[-1]==runtime_ids[-2]:
+                break
+            texts.append(selected[0].window_text())
+            recorded_num+=1
+        pyautogui.press('up',presses=1,_pause=False)
+    if select:pyautogui.press('esc')
+    chatList.type_keys('{END}')
+    return texts
 
 def process_audios(audios:list[str],audio_length:int=60):
     '''

@@ -72,6 +72,7 @@ from packaging import version#字符串版本比较,4.1.9>4.1.8>4.1.7
 #####################################################################################
 #内部依赖
 from .Config import GlobalConfig
+from .utils import traverse_chat_history_list,traverse_chatList
 from .utils import scan_for_new_messages,get_new_message_num,process_audios,ContentSender
 from .utils import At,At_all,ColorMatch,Regex_Patterns,Special_Labels,TimeStamps
 from .Warnings import LongTextWarning,NoChatHistoryWarning
@@ -81,7 +82,7 @@ from .Errors import TimeNotCorrectError
 from .Errors import NoFilesToSendError
 from .Errors import NotFolderError
 from .Errors import NotFriendError
-from .Uielements import (Main_window,SideBar,Buttons,
+from .Uielements import (Main_window,SideBar,Buttons,TabItems,
 Edits,Texts,Lists,Panes,Windows,CheckBoxes,MenuItems,Groups,Customs,ListItems)#导入的是自动判断语言后的实例化对象,如果自行使用需要导入xxx_Control
 #######################################################################################
 desktop=Desktop(backend='uia')#pywinauto的windows桌面对象(WindowSpecification)实例化
@@ -180,7 +181,7 @@ class AutoReply():
                     if newMessage.class_name()=='mmui::ChatTextItemView':
                         texts.append(newMessage.window_text())
                         dialog_window.restore()
-                        is_my_bubble=Tools.is_my_bubble(dialog_window,newMessage)
+                        is_my_bubble=Tools.is_my_bubble(dialog_window,newMessage,input_edit)
                         if not is_my_bubble:
                             reply_content=callback(newMessage.window_text(),contexts)
                             if reply_content is not None:
@@ -211,7 +212,7 @@ class AutoReply():
 
 class Call():
     @staticmethod
-    def voice_call(friend:str,is_maximize:bool=None,close_weixin:bool=None)->(WindowSpecification|None):
+    def voice_call(friend:str,wait_for_answer:bool=False,is_maximize:bool=None,close_weixin:bool=None)->(WindowSpecification|None):
         '''
         该方法用来给好友拨打语音电话
         Args:
@@ -236,28 +237,33 @@ class Call():
                 voice_call_button=main_window.child_window(**Buttons.VoiceCallButton)
                 voice_call_button.click_input()
             VoipCall_window=Tools.move_window_to_center(Windows.VoipCallWindow)
+            if close_weixin:main_window.close()
+            if wait_for_answer:
+                try:
+                    duration_label=VoipCall_window.child_window(class_name="mmui::VOIPDurationTextView").wait(wait_for='ready',timeout=50)
+                    return VoipCall_window
+                except Exception:
+                    print(f'本次通话已挂断')
+                    return None
         if is_group:
             print(f'不支持群聊语音电话(SessionPicker-Window Ui自动化有Bug,微信会卡死崩溃！')
-            VoipCall_window=None
-        if close_weixin:main_window.close()
-        return VoipCall_window
+            return None
 
     @staticmethod
-    def video_call(friend:str,is_maximize:bool=None,close_weixin:bool=None)->(WindowSpecification|None):
+    def video_call(friend:str,wait_for_answer:bool=False,is_maximize:bool=None,close_weixin:bool=None)->(WindowSpecification|None):
         '''
         该方法用来给好友拨打视频电话
         Args:
             friend:好友备注
             close_weixin:任务结束后是否关闭微信,默认关闭
         '''
-    
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
         if close_weixin is None:
             close_weixin=GlobalConfig.close_weixin
         main_window=Navigator.open_dialog_window(friend=friend,is_maximize=is_maximize) 
         is_group=Tools.is_group_chat(main_window)
-        current_version=version.parse(GlobalConfig.version)
+        current_version=version.parse(GlobalConfig.Version)
         old_version=version.parse('4.1.7')#4.1.8开始微信把语言和视频电话合并在顶部
         if not is_group: 
             if current_version>old_version:
@@ -269,12 +275,20 @@ class Call():
                 video_call_button=main_window.child_window(**Buttons.VideoCallButton)
                 video_call_button.click_input()
             VoipCall_window=Tools.move_window_to_center(Windows.VoipCallWindow)
+            if close_weixin:main_window.close()
+            if wait_for_answer:
+                try:
+                    duration_label=VoipCall_window.child_window(class_name="mmui::VOIPDurationTextView").wait(wait_for='ready',timeout=50)
+                    return VoipCall_window
+                except Exception:
+                    print(f'本次通话已挂断！')
+                    return None
         if is_group:
-            VoipCall_window=None
             print(f'不支持群聊视频电话(SessionPicker-Window Ui自动化有Bug,微信会卡死崩溃！')
-        if close_weixin:main_window.close()
-        return VoipCall_window
-
+            if close_weixin:main_window.close()
+            return None
+    
+       
 class Collections():
     
 
@@ -438,7 +452,7 @@ class Contacts():
     @staticmethod
     def check_my_info(is_maximize:bool=None,close_weixin:bool=None)->dict:
         '''
-        该函数用来查看个人信息
+        该方法用来查看个人信息
         Args:
             is_maximize:微信界面是否全屏，默认不全屏
             close_weixin:任务结束后是否关闭微信，默认关闭
@@ -466,6 +480,56 @@ class Contacts():
         profile_pane.close()
         moments_window.close()
         return myinfo
+    
+    @staticmethod
+    def get_groupMembers_info(group:str,is_maximize:bool=None,search_pages:int=None,close_weixin:bool=None)->list[str]:
+        '''
+        该方法用来获取群聊内所有成员的名称
+        Args:
+            group:群聊名称
+            is_maximize:微信界面是否全屏，默认不全屏
+            close_weixin:任务结束后是否关闭微信，默认关闭
+        Returns:
+            groupMembers:群成语名称列表,['xxx','yyy'...'zzz']
+        '''
+        #鼠标移动到朋友圈顶部右下角,点击头像按钮，激活弹出窗口
+        if is_maximize is None:
+            is_maximize=GlobalConfig.is_maximize
+        if search_pages is None:
+            search_pages=GlobalConfig.search_pages
+        if close_weixin is None:
+            close_weixin=GlobalConfig.close_weixin
+        groupMembers=[]
+        runtime_ids=[]
+        chat_history_window,is_group_chat=Navigator.open_chat_history(friend=group,is_maximize=is_maximize,search_pages=search_pages)
+        if is_group_chat:
+            Tools.cancel_pin(chat_history_window)
+            win32gui.SendMessage(chat_history_window.handle,win32con.WM_SYSCOMMAND,win32con.SC_MAXIMIZE,0)
+            chat_history_window.child_window(**TabItems.GroupMembersTabItem).click_input()
+            total_num=int(re.search(rf'\((\d+)\)',chat_history_window.window_text()).group(1))
+            pop_over=desktop.window(**Windows.PopOverWindow)
+            groupMember_list=pop_over.child_window(control_type='List')
+            groupMember_list.type_keys('{PGUP}')#激活列表
+            time.sleep(2)#必须等待,不然ui的文本属性加载不出来
+            first_item=groupMember_list.children()[1]
+            rectangle=first_item.rectangle()
+            mouse.move(coords=(rectangle.mid_point().x,rectangle.mid_point().y))
+            time.sleep(2)#必须等待,不然ui的文本属性加载不出来
+            while len(groupMembers)<total_num:
+                selected=[listitem for listitem in groupMember_list.children() if listitem.has_keyboard_focus() and listitem.window_text()!='']
+                if selected:
+                    runtime_ids.append(selected[0].element_info.runtime_id)
+                    #同一个runtime_id挨着重复出现就说明到底部了无法继续下滑
+                    if len(runtime_ids)>2 and runtime_ids[-1]==runtime_ids[-2]:
+                        break
+                    groupMembers.append(selected[0].window_text())
+                pyautogui.keyDown('down',_pause=False)
+            groupMember_list.type_keys('{HOME}')
+            pop_over.close()
+        else:
+            print(f'非群聊,无法获取群内成员名称!')
+        chat_history_window.close()
+        return groupMembers
 
     @staticmethod
     def get_friends_detail(is_maximize:bool=None,close_weixin:bool=None,is_json:bool=False)->(list[dict]|str):
@@ -3451,7 +3515,87 @@ class Messages():
             if close_weixin:
                 main_window.close()
         return messages
+    
+    @staticmethod
+    def pull_messages2(friend:str,number:int,search_pages:int=None,is_maximize:bool=None,close_weixin:bool=None)->list[str]:
+        '''
+        该函数用来从聊天界面获取聊天消息,也可当做获取聊天记录
+        Args:
+            friend:好友名称
+            number:获取的消息数量
+            search_pages:打开好友聊天窗口时在会话列表中查找好友时滚动列表的次数,默认为5,一次可查询5-12人,为0时,直接从顶部搜索栏搜索好友信息打开聊天界面
+            is_maximize:微信界面是否全屏，默认不全屏
+            close_weixin:任务结束后是否关闭微信，默认关闭
+        Returns:
+            (contents,senders):消息内容与消息发送人
+        '''
+        
+        def check_my_info():
+            '''打开朋友圈获取我的昵称,为了节省时间不去调用Contacts.check_my_info'''
+            moments_window=Navigator.open_moments(is_maximize=is_maximize,close_weixin=False)
+            moments_list=moments_window.child_window(control_type='List',auto_id="sns_list")
+            rec=moments_list.children()[0].rectangle()
+            coords=(rec.right-60,rec.bottom-35)
+            mouse.click(coords=coords)
+            profile_pane=desktop.window(**Windows.PopUpProfileWindow)
+            group=profile_pane.child_window(control_type='Group',found_index=3).children()[1]
+            texts=group.descendants(control_type='Text')
+            myName=texts[0].window_text()
+            moments_window.close()
+            return myName
 
+        def extract_info_single_chat(texts_with_name:list[str]):
+            '''私聊提取信息,不是自己发的就是对方发的匹配不到自己名字那就是对方发的'''
+            senders=[]
+            contents=[]
+            for text in texts_with_name:
+                sender=friend if re.search(rf'^{friend}\s',text) is not None else myName
+                content=re.sub(rf'^{sender}\s','',text)
+                senders.append(sender)
+                contents.append(content)
+            return senders,contents
+        
+        def extract_info_group_chat(texts_with_name:list[str],texts_without_name:list[str]):
+            '''群聊提取信息,由于不同群成员的昵称复杂不能简单使用正则查找,故两种思路:
+            遍历两次，一次在多选状态下遍历，可以获取到昵称+内容+时间戳。第二次在正常状态下遍历,可以获取到内容+时间戳。两次结果对比替换即可获取到昵称
+            '''
+            senders=[]
+            contents=[]
+            for text_with_name,text_without_name in zip(texts_with_name,texts_without_name):
+                sender=text_with_name.replace(text_without_name,'').strip()
+                if sender=='':sender='红包或转账(无法获取发送人)'
+                senders.append(sender)
+                contents.append(text_without_name)
+            return senders,contents
+
+        if is_maximize is None:
+            is_maximize=GlobalConfig.is_maximize
+        if close_weixin is None:
+            close_weixin=GlobalConfig.close_weixin
+        if search_pages is None:
+            search_pages=GlobalConfig.search_pages
+        messages=[]
+        main_window=Navigator.open_dialog_window(friend=friend,is_maximize=is_maximize,search_pages=search_pages)
+        chat_list=main_window.child_window(**Lists.FriendChatList)
+        if not chat_list.exists(timeout=0.1):
+            print(f'非正常好友或群聊,无法获取聊天信息！')
+            return messages
+        else:
+            
+            if not chat_list.children(control_type='ListItem'):
+                warn(message=f'你与{friend}的聊天记录为空,无法获取聊天信息',category=NoChatHistoryWarning)
+                return messages
+            else:
+                is_group_chat=Tools.is_group_chat(main_window)
+                if not is_group_chat:myName=check_my_info()
+                texts_with_name=traverse_chatList(main_window,select=True,number=number)
+                if not is_group_chat:
+                    senders,contents=extract_info_single_chat(texts_with_name)
+                if is_group_chat:
+                    texts_without_name=traverse_chatList(main_window,select=False,number=number)
+                    senders,contents=extract_info_group_chat(texts_with_name,texts_without_name)
+            if close_weixin:main_window.close()
+        return contents,senders
 
     @staticmethod
     def dump_chat_history(friend:str,number:int,search_content:str=None,capture_alia:bool=False,alias_folder:str=None,
@@ -3499,7 +3643,6 @@ class Messages():
                 pyautogui.press('enter')
                 time.sleep(0.5)#0.5s延迟让图片缓存到剪贴板时间
                 SystemSettings.save_pasted_image(image_path)
-        
         if is_maximize is None:
             is_maximize=GlobalConfig.is_maximize
         if close_weixin is None:
@@ -3525,7 +3668,7 @@ class Messages():
         image_pressed_num=2 if old_version else 1
         video_pressed_num=3 if old_version else 2
         timestamp_pattern=Regex_Patterns.Chathistory_Timestamp_pattern
-        chat_history_window=Navigator.open_chat_history(friend=friend,is_maximize=is_maximize,close_weixin=close_weixin,search_pages=search_pages)
+        chat_history_window,is_group_chat=Navigator.open_chat_history(friend=friend,is_maximize=is_maximize,close_weixin=close_weixin,search_pages=search_pages)
         chat_history_list=chat_history_window.child_window(**Lists.ChatHistoryList)
         copy_item=chat_history_window.child_window(**MenuItems.CopyMenuItem)
         if isinstance(search_content,str):
@@ -3574,6 +3717,154 @@ class Messages():
         timestamps=[timestamp_pattern.search(message).group(0) if timestamp_pattern.search(message) else '系统消息或为红包与转账(无法获取时间戳)' for message in messages]
         messages=[timestamp_pattern.sub('',message) for message in messages]
         return messages,timestamps
+
+    @staticmethod
+    def dump_chat_history2(friend:str,number:int,search_content:str=None,search_pages:int=None,is_maximize:bool=None,close_weixin:bool=None)->tuple[list,list]:
+        '''
+        该函数用来获取一定数量的聊天记录,可以获取到消息发送人
+        Args:  
+            friend:好友名称
+            number:获取的消息数量
+            search_content:搜索关键字,传入后会先在顶部搜索关键字然后向下遍历
+            search_pages:打开好友聊天窗口时在会话列表中查找好友时滚动列表的次数,默认为5,一次可查询5-12人,为0时,直接从顶部搜索栏搜索好友信息
+            is_maximize:微信界面是否全屏，默认不全屏
+            close_weixin:任务结束后是否关闭微信，默认关闭
+        Returns:
+            (contents,senders,timestamps):消息内容,发送人,发送时间
+        '''
+        if is_maximize is None:
+            is_maximize=GlobalConfig.is_maximize
+        if close_weixin is None:
+            close_weixin=GlobalConfig.close_weixin
+        if search_pages is None:
+            search_pages=GlobalConfig.search_pages
+
+        def get_groupMembers_info():
+            '''获取群成员列表,为了节省时间不去调用Contacts.get_groupMembers_info'''
+            runtime_ids=[]
+            groupMembers=[]
+            Tools.cancel_pin(chat_history_window)
+            chat_history_window.child_window(**TabItems.GroupMembersTabItem).click_input()
+            total_num=int(re.search(rf'\((\d+)\)',chat_history_window.window_text()).group(1))
+            pop_over=desktop.window(**Windows.PopOverWindow)
+            groupMember_list=pop_over.child_window(control_type='List')
+            groupMember_list.type_keys('{PGUP}')#激活列表
+            time.sleep(1)#必须等待,不然ui的文本属性加载不出来
+            first_item=groupMember_list.children()[1]
+            rectangle=first_item.rectangle()
+            mouse.move(coords=(rectangle.mid_point().x,rectangle.mid_point().y))
+            time.sleep(2)#必须等待,不然ui的文本属性加载不出来
+            while len(groupMembers)<total_num:
+                selected=[listitem for listitem in groupMember_list.children() if listitem.has_keyboard_focus() and listitem.window_text()!='']
+                if selected:
+                    runtime_ids.append(selected[0].element_info.runtime_id)
+                    #同一个runtime_id挨着重复出现就说明到底部了无法继续下滑
+                    if len(runtime_ids)>2 and runtime_ids[-1]==runtime_ids[-2]:
+                        break
+                    groupMembers.append(selected[0].window_text())
+                pyautogui.keyDown('down')
+            groupMember_list.type_keys('{HOME}')
+            pop_over.close()
+            return groupMembers
+
+        def check_my_info():
+            '''打开朋友圈获取我的昵称,为了节省时间不去调用Contacts.check_my_info'''
+            moments_window=Navigator.open_moments(is_maximize=is_maximize,close_weixin=False)
+            moments_list=moments_window.child_window(control_type='List',auto_id="sns_list")
+            rec=moments_list.children()[0].rectangle()
+            coords=(rec.right-60,rec.bottom-35)
+            mouse.click(coords=coords)
+            profile_pane=desktop.window(**Windows.PopUpProfileWindow)
+            group=profile_pane.child_window(control_type='Group',found_index=3).children()[1]
+            texts=group.descendants(control_type='Text')
+            myName=texts[0].window_text()
+            moments_window.close()
+            return myName
+
+        def extract_info_single_chat(texts_with_name:list[str]):
+            '''私聊提取信息,不是自己发的就是对方发的匹配不到自己名字那就是对方发的'''
+            senders=[]
+            contents=[]
+            timestamps=[]
+            for text in texts_with_name:
+                timestamp=timestamp_pattern.search(text).group(0) if timestamp_pattern.search(text) else '红包或转账(无法获取时间戳)'
+                text=timestamp_pattern.sub('',text)
+                if timestamp=='红包或转账(无法获取时间戳)':
+                    sender='红包或转账(无法获取发送人)'
+                    content=text
+                else:
+                    sender=friend if re.search(rf'^{friend}\s',text) is not None else myName
+                    content=re.sub(rf'^{sender}\s','',text)
+                senders.append(sender)
+                contents.append(content)
+                timestamps.append(timestamp)
+            return senders,contents,timestamps
+        
+        def extract_info_group_chat(texts_with_name:list[str],texts_without_name:list[str],groupMembers:list[str]):
+            '''群聊提取信息,由于不同群成员的昵称复杂不能简单使用正则查找,故两种思路:
+            1.获取到群成员列表然后挨个找(这个100%)可以，但是群内人数较多且大部分在潜水时，这个方法过于浪费时间不值得
+            2.遍历两次，一次在多选状态下遍历，可以获取到昵称+内容+时间戳。第二次在正常状态下遍历,可以获取到内容+时间戳。两次结果对比替换即可获取到昵称
+            综上根据相对数量来使用，如果群成员比较多,大于10
+            '''
+            senders=[]
+            contents=[]
+            timestamps=[]
+            if groupMembers:
+                for text in texts_with_name:
+                    timestamp=timestamp_pattern.search(text).group(0) if timestamp_pattern.search(text) else '红包或转账(无法获取时间戳)'
+                    if timestamp=='红包或转账(无法获取时间戳)':
+                        sender='红包或转账(无法获取发送人)'
+                    else:
+                        for groupMember in groupMembers:
+                            search_result=re.search(rf'^({groupMember})\s',text)
+                            if search_result is not None:sender=search_result.group(1)
+                    content=timestamp_pattern.sub('',text).replace(sender,'')
+                    senders.append(sender)
+                    contents.append(content)
+                    timestamps.append(timestamp)
+            else:
+                for text_with_name,text_without_name in zip(texts_with_name,texts_without_name):
+                    timestamp=timestamp_pattern.search(text_without_name).group(0) if timestamp_pattern.search(text_without_name) else '红包或转账(无法获取时间戳)'
+                    content=timestamp_pattern.sub('',text_without_name)
+                    if timestamp=='红包或转账(无法获取时间戳)':
+                        sender='红包或转账(无法获取发送人)'
+                    else:
+                        sender=text_with_name.replace(text_without_name,'').strip()
+                        sender=timestamp_pattern.sub('',sender).replace(content,'')
+                    senders.append(sender)
+                    contents.append(content)
+                    timestamps.append(timestamp)
+            return senders,contents,timestamps
+       
+        groupMembers=[]
+        timestamp_pattern=Regex_Patterns.Chathistory_Timestamp_pattern
+        chat_history_window,is_group_chat=Navigator.open_chat_history(friend=friend,is_maximize=is_maximize,close_weixin=close_weixin,search_pages=search_pages)
+        chat_history_list=chat_history_window.child_window(**Lists.ChatHistoryList)
+        if not is_group_chat:
+            Tools.cancel_pin(chat_history_window)#取消聊天记录窗口置顶,不然朋友圈窗口在底部看不到
+            myName=check_my_info()
+        if isinstance(search_content,str):
+            search_bar=chat_history_window.descendants(**Edits.SearchEdit)[0]
+            search_bar.set_text(search_content)
+        if not chat_history_list.exists(timeout=1):
+            warn(message=f"你与{friend}的聊天记录为空,无法获取聊天记录!",category=NoChatHistoryWarning)
+            chat_history_window.close()
+            return [],[],[]
+        win32gui.SendMessage(chat_history_window.handle,win32con.WM_SYSCOMMAND,win32con.SC_MAXIMIZE,0)
+        texts_with_name=traverse_chat_history_list(chat_history_window,select=True,number=number)
+        if not is_group_chat:
+            senders,contents,timestamps=extract_info_single_chat(texts_with_name)
+        if is_group_chat:
+            total_num=int(re.search(rf'\((\d+)\)',chat_history_window.window_text()).group(1))
+            #要么获取群成员名称后按个查找确认sender，要么在不选择的情况下遍历一遍然后替换比较得到sender
+            if total_num<number and total_num<100:#根据数量选择具体的一个,群聊人数比要获取的聊天记录少的多的情况下直接获取群成员信息
+                groupMembers=get_groupMembers_info()
+                senders,contents,timestamps=extract_info_group_chat(texts_with_name,[],groupMembers)
+            else:
+                texts_without_name=traverse_chat_history_list(chat_history_window,select=False,number=number)
+                senders,contents,timestamps=extract_info_group_chat(texts_with_name,texts_without_name,[])
+        chat_history_window.close()
+        return contents,senders,timestamps
 
     @staticmethod
     def dump_recent_chat_history(friend:str,recent:Literal['Today','Week','Month']='Today',number:int=1000,search_content:str=None,capture_alia:bool=False,alias_folder:str=None,
@@ -3833,7 +4124,7 @@ class Messages():
             print(f'未传入文件夹路径,聊天图片或视频将保存至 {target_folder}')
         saved_num=0
         presses_num=1 if '4.1.9' in GlobalConfig.Version else 2
-        chat_history_window=Navigator.open_chat_history(friend=friend,TabItem='图片与视频',search_pages=search_pages,is_maximize=is_maximize,close_weixin=close_weixin)
+        chat_history_window,_=Navigator.open_chat_history(friend=friend,TabItem='图片与视频',search_pages=search_pages,is_maximize=is_maximize,close_weixin=close_weixin)
         image_container=chat_history_window.child_window(control_type='Group',class_name="QFWidget")
         if not image_container.exists():#看一下是否存在聊天记录列表，如果不存在说明没有聊天记录    
             chat_history_window.close()

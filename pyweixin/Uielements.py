@@ -515,6 +515,7 @@ class MenuItem_Control():
         self.language=language
         self.Version=Version
         if self.language=='简体中文':
+            self.TickleMenuItem={'title':'拍一拍','control_type':'MenuItem'}#拍一拍好友
             self.ForwardMenuItem={'title':'转发...','control_type':'MenuItem'}#右键后的转发消息MenuItem
             self.CopyMenuItem={'title':'复制','control_type':'MenuItem'}#右键菜单里的复制消息
             self.SaveMenuItem={'title':'另存为...','control_type':'MenuItem'}#右键图片视频或文件时菜单里的另存为
@@ -529,6 +530,7 @@ class MenuItem_Control():
             self.FindInChatMenuItem={'title':'定位到聊天位置','control_type':'MenuItem'}#聊天记录页面内右键消息后的Find in chat选项
             self.CopyLinkMenuItem={'title':'复制链接','auto_id':'XMenuItem','control_type':'MenuItem'}#在收藏界面右键菜单里的复制链接选项目
         if self.language=='English':
+            self.TickleMenuItem={'title':'Tickle','control_type':'MenuItem'}#拍一拍好友
             self.ForwardMenuItem={'title':'Forward...','control_type':'MenuItem'}#右键后的转发消息MenuItem
             self.CopyMenuItem={'title':'Copy','control_type':'MenuItem'}#右键菜单里的复制消息
             self.SaveMenuItem={'title':'Save as...','control_type':'MenuItem'}#右键图片视频或文件时菜单里的另存为
@@ -543,6 +545,7 @@ class MenuItem_Control():
             self.FindInChatMenuItem={'title':'Find in Chat','control_type':'MenuItem'}#聊天记录页面内右键消息后的Find in chat选项
             self.CopyLinkMenuItem={'title':'Copy URL','auto_id':'XMenuItem','control_type':'MenuItem'}#在收藏界面右键菜单里的复制链接选项目
         if self.language=='繁體中文':
+            self.TickleMenuItem={'title':'拍一拍','control_type':'MenuItem'}#拍一拍好友
             self.ForwardMenuItem={'title':'轉發...','control_type':'MenuItem'}#右键后的转发消息MenuItem
             self.CopyMenuItem={'title':'複製','control_type':'MenuItem'}#右键菜单里的复制消息
             self.SaveMenuItem={'title':'另存為...','control_type':'MenuItem'}#右键图片视频或文件时菜单里的另存为
@@ -667,7 +670,8 @@ class TabItem_Control():
             self.MiniProgramTabItem={'title':'小程序','control_type':'TabItem','class_name':'mmui::XButton','framework_id':'Qt'}#微信聊天记录界面里顶部的小程序Tabitem
             self.MusicTabItem={'title':'音乐与音频','control_type':'TabItem','class_name':'mmui::XButton','framework_id':'Qt'}#微信聊天记录界面里顶部的音乐Tabitem
             self.ChannelTabItem={'title':'视频号','control_type':'TabItem','class_name':'mmui::XButton','framework_id':'Qt'}#微信聊天记录界面里顶部的视频号Tabitem
-            self.DateTabItem={'title':'日期','control_type':'TabItem'}#微信聊天记录界面里顶部的日期TabitemW
+            self.DateTabItem={'title':'日期','control_type':'TabItem'}#微信聊天记录界面里顶部的日期Tabitem
+            self.GroupMembersTabItem={'title':'群成员','control_type':'TabItem'}#微信聊天记录界面里顶部的群成员Tabitem
         if self.language=='English':
             self.GeneralTabItem={'title':'General','control_type':'TabItem'}#微信设置界面里左侧的通用设置Tabitem
             self.MyAccountTabItem={'title':'My Account','control_type':'TabItem'}#微信设置界面里左侧的账号设置Tabitem
@@ -679,6 +683,7 @@ class TabItem_Control():
             self.MusicTabItem={'title':'Music','control_type':'TabItem','class_name':'mmui::XButton','framework_id':'Qt'}#微信聊天记录界面里顶部的音乐Tabitem
             self.ChannelTabItem={'title':'Channels','control_type':'TabItem','class_name':'mmui::XButton','framework_id':'Qt'}#微信聊天记录界面里顶部的视频号Tabitem
             self.DateTabItem={'title':'Date','control_type':'TabItem'}#微信聊天记录界面里顶部的日期Tabitem
+            self.GroupMembersTabItem={'title':'Group Members','control_type':'TabItem'}#微信聊天记录界面里顶部的群成员Tabitem
         if self.language=='繁體中文':
             self.GeneralTabItem={'title':'一般','control_type':'TabItem'}#微信设置界面里左侧的通用设置Tabitem
             self.MyAccountTabItem={'title':'賬號與儲存','control_type':'TabItem'}#微信设置界面里左侧的账号设置Tabitem
@@ -690,6 +695,7 @@ class TabItem_Control():
             self.MusicTabItem={'title':'音樂','control_type':'TabItem','class_name':'mmui::XButton','framework_id':'Qt'}#微信聊天记录界面里顶部的音乐Tabitem
             self.ChannelTabItem={'title':'影音號','control_type':'TabItem','class_name':'mmui::XButton','framework_id':'Qt'}#微信聊天记录界面里顶部的视频号Tabitem
             self.DateTabItem={'title':'日期','control_type':'TabItem'}#微信聊天记录界面里顶部的日期Tabitem
+            self.GroupMembersTabItem={'title':'群組成員','control_type':'TabItem'}#微信聊天记录界面里顶部的群成员Tabitem
 
 class Window_Control():
     def __init__(self,language=language,Version=Version):
@@ -700,12 +706,13 @@ class Window_Control():
         self.PopUpProfileWindow={'title':'Weixin','control_type':'Window','class_name':'mmui::ProfileUniquePop'}#好友设置界面点击头像后弹出的个人简介窗口
         self.NativeChooseFileWindow={'control_type':'Window','framework_id':'Win32','top_level_only':False,'found_index':0}#windows本地选择文件夹窗口
         self.MentionPopOverWindow={'control_type':'Window','auto_id':'MentionPopover','found_index':0}#群聊输入@后弹出的群成员选择界面
-        self.PopOverWindow={'control_type':'Window','class_name':'mmui::XPopover'}#当微信窗口足够小的时候,会收起一部分侧边栏按钮到这个窗口内,此时需要点击...后在这个界面内点击
+        self.PopOverWindow={'control_type':'Window','class_name':'mmui::XPopover'}#聊天记录界面内点击群成员弹出的窗口
         self.SolitaireWindow={'control_type':'Window','class_name':'mmui::SolitaireWindow'}#群接龙窗口
         self.ImagePreviewWindow={'control_type':'Window','class_name':'mmui::PreviewWindow'}#微信点击图片或视频后桌面弹出的图片与视频窗口
         self.AddfriendWindow={'control_type':'Window','class_name':'mmui::AddFriendWindow'}#添加好友窗口
         self.SearchChatHistoryWindow={'control_type':'Window','auto_id':'GlobalSearchMsgWindow'}#聊天记录搜索窗口
         self.SnsPublishWindow={'auto_id':'SnsPublishPanel','control_type':'Window'}#微信朋友圈后发布按钮点击后的面板
+        self.VoipCallWindow={'class_name':'mmui::VOIPWindow'}#接通语音或视频电话后的通话窗口
         if self.language=='简体中文':
             self.MomentsWindow={'title':'朋友圈','control_type':'Window','class_name':'mmui::SNSWindow'}#好友朋友圈窗口
             self.SessionPickerWindow={'control_type':'Window','title':'微信发送给','class_name':'mmui::SessionPickerWindow'}#转发消息的session_picker_window
@@ -722,7 +729,6 @@ class Window_Control():
             self.ChannelsWindow={'title':'微信','class_name':'Chrome_WidgetWin_0','control_type':'Pane'}#视频号窗口
             self.NoteWindow={'title':'笔记','framework_id':"Win32"}#笔记窗口
             self.IncomingCallWindow={'title':'微信','class_name':'mmui::VOIPTrayWindow'}#微信来电(视频或语音)桌面右下角的托盘窗口
-            self.VoipCallWindow={'title':'微信音视频通话','class_name':'mmui::VOIPWindow'}#接通语音或视频电话后的通话窗口
             self.PrivacyWindow={'title':'朋友权限','class_name':'mmui::ProfileUniquePop'}#好友权限窗口,4.1.9点击好友权限后弹出的窗口独立于桌面了
         if self.language=='English':
             self.MomentsWindow={'title':'Moments','control_type':'Window','class_name':'mmui::SNSWindow'}#好友朋友圈窗口
@@ -740,8 +746,7 @@ class Window_Control():
             self.ChannelsWindow={'title':'WeChat','class_name':'Chrome_WidgetWin_0','control_type':'Pane'}#视频号窗口
             self.NoteWindow={'title':'Note','framework_id':"Win32"}#笔记窗口
             self.IncomingCallWindow={'title':'Weixin','class_name':'mmui::VOIPTrayWindow'}#微信来电(视频或语音)桌面右下角的托盘窗口
-            self.VoipCallWindow={'title':'Weixin Voice & Video Calls','class_name':'mmui::VOIPWindow'}#接通语音或视频电话后的通话窗口
-        if self.language=='繁體中文':
+        if self.language=='繁體中文':   
             self.MomentsWindow={'title':'朋友圈','control_type':'Window','class_name':'mmui::SNSWindow'}#好友朋友圈窗口
             self.SessionPickerWindow={'control_type':'Window','title':'微信傳送给','class_name':'mmui::SessionPickerWindow'}#转发消息的session_picker_window
             self.VerifyFriendWindow={'control_type':'Window','title':'申請新增朋友','class_name':'mmui::VerifyFriendWindow'}#添加新朋友时的申请添加朋友界面
@@ -757,7 +762,6 @@ class Window_Control():
             self.ChannelsWindow={'title':'WeChat','class_name':'Chrome_WidgetWin_0','control_type':'Pane'}#视频号窗口
             self.NoteWindow={'title':'筆記','framework_id':"Win32"}#笔记窗口
             self.IncomingCallWindow={'title':'微信','class_name':'mmui::VOIPTrayWindow'}#微信来电(视频或语音)桌面右下角的托盘窗口
-            self.VoipCallWindow={'title':'微信語音/視訊通話 ','class_name':'mmui::VOIPWindow'}#接通语音或视频电话后的通话窗口
             self.PrivacyWindow={'title':'朋友權限','class_name':'mmui::ProfileUniquePop'}#好友权限窗口,4.1.9点击好友权限后弹出的窗口独立于桌面了
 
 Main_window=Main_window_Control(language=language,Version=Version)#主界面UI
