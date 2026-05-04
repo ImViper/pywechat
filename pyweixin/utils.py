@@ -769,10 +769,10 @@ def select_chatList(main_window:WindowSpecification)->(ListItemWrapper|None):
         if selected:
             if selected[0].class_name()!='mmui::ChatItemView':
                 rect=selected[0].rectangle()
-                right_clik_pos=rect.left+120,rect.bottom-40
+                right_clik_pos=rect.left+120,rect.bottom-60
                 mouse.right_click(coords=right_clik_pos)
                 if not multiselect_item.exists(timeout=0.2):
-                    right_clik_pos=rect.right-120,rect.bottom-40
+                    right_clik_pos=rect.right-120,rect.bottom-60
                     mouse.right_click(coords=right_clik_pos)
                 multiselect_item.click_input()
                 mouse.click(coords=right_clik_pos)
