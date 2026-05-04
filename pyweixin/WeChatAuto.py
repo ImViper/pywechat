@@ -3738,7 +3738,6 @@ class Messages():
             close_weixin=GlobalConfig.close_weixin
         if search_pages is None:
             search_pages=GlobalConfig.search_pages
-
         def get_groupMembers_info():
             '''获取群成员列表,为了节省时间不去调用Contacts.get_groupMembers_info'''
             runtime_ids=[]
@@ -3753,7 +3752,7 @@ class Messages():
             first_item=groupMember_list.children()[1]
             rectangle=first_item.rectangle()
             mouse.move(coords=(rectangle.mid_point().x,rectangle.mid_point().y))
-            time.sleep(2)#必须等待,不然ui的文本属性加载不出来
+            time.sleep(1)#必须等待,不然ui的文本属性加载不出来
             while len(groupMembers)<total_num:
                 selected=[listitem for listitem in groupMember_list.children() if listitem.has_keyboard_focus() and listitem.window_text()!='']
                 if selected:

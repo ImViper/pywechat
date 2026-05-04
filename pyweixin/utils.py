@@ -398,61 +398,6 @@ class TimeStamp():
             month_label=re.sub(r'年0','年',month_label)
         return month_label
 
-def At(main_window:WindowSpecification,at_members:list[str]):
-    '''
-    在群里@指定的好友,可用于自定义的消息发送函数中
-    Args:
-        main_window:微信主界面
-        at_members:群内所有at对象,必须是群昵称
-    '''
-    def select(mention_popover:WindowSpecification,member:str):
-        '''
-        微信的@机制必须type_keys打字才可以唤醒,并且是模糊文字匹配(只匹配文字,空格表情都不匹配)
-        若好友的名字中有空格和表情,那么打字的内容只能是第一个空格之前的所有非空格文字,但凡多一个空格
-        就不会唤醒@,同时由于表情不好打字,所以替换掉,出现mention面板然后在弹出的列表里完整匹配
-        '''
-        is_find=True
-        mention_list=mention_popover.child_window(control_type='List',title='')
-        first_item=mention_list.children()[0].window_text()#弹出列表后的第一个人
-        selected_listitem=[listitem for listitem in mention_list.children() if listitem.is_selected()][0]
-        while selected_listitem.window_text()!=member:#一直按着下键找，找到了结束循环，或者遍历完一圈又回到了起点也结束循环(即选中的对象与第一个人名字相同)
-            mention_list.type_keys('{DOWN}')
-            selected_listitem=[listitem for listitem in mention_list.children() if listitem.is_selected()][0]
-            if selected_listitem.window_text()==first_item:
-                is_find=False
-                break
-        return is_find
-        
-    if Tools.is_group_chat(main_window):
-        edit_area=main_window.child_window(**Edits.CurrentChatEdit)
-        mention_popover=main_window.child_window(**Windows.MentionPopOverWindow)
-        for member in at_members:
-            cleaned_member=emoji.replace_emoji(member,'')#去掉emoji
-            cleaned_member=cleaned_member.split(' ')[0]#找到第一个空格字段之前内容
-            edit_area.type_keys(f'@{cleaned_member}')
-            if mention_popover.exists(timeout=0.1):
-                is_find=select(mention_popover,member)
-                if is_find:
-                    edit_area.type_keys('{ENTER}')
-                if not is_find:
-                    pyautogui.press('backspace',presses=len(cleaned_member)+1)
-            else:
-                edit_area.set_text('')
-
-def At_all(main_window:WindowSpecification):
-    '''在群里@所有人'''
-    if Tools.is_group_chat(main_window):
-        edit_area=main_window.child_window(**Edits.CurrentChatEdit)
-        mention_popover=main_window.child_window(**Windows.MentionPopOverWindow)
-        edit_area.type_keys(f'@')
-        if mention_popover.exists(timeout=0.1):
-            mention_list=mention_popover.child_window(control_type='List',title='')
-            first_item=mention_list.children()[0].window_text()#弹出列表后的第一个人
-            if first_item!='所有人':
-                pyautogui.press('backspace',presses=1)
-                print(f'你不是该群群主或管理员,无权@所有人')
-            else:
-                edit_area.type_keys('{ENTER}')
 class ContentSender():
     '''发送消息的一些操作,传入的参数是main_window(微信),且不涉及关闭微信窗口,便于个人二次开发'''
     @staticmethod
@@ -529,7 +474,7 @@ class ContentSender():
         该方法用于给当前聊天界面内的好友或群聊发送语音
         Args:
             friend:好友或群聊备注。格式:friend="好友或群聊备注"
-            audios:所有待发送消息列表。格式:message=["消息1","消息2"]
+            audios:所有待发送消息列表。格式:audios=["xxx.wav","yyy.mp3"...]
             audio_length:语音长度,按照微信语音
             send_delay:发送单条信息的延迟,单位:秒/s,默认0.2s。
         '''
@@ -594,6 +539,63 @@ class ContentSender():
                 mouse.click(coords=position)
                 solitaire_window.child_window(control_type='Edit',found_index=2).set_text(description)
             solitaire_button.click_input()
+
+def At(main_window:WindowSpecification,at_members:list[str]):
+    '''
+    在群里@指定的好友,可用于自定义的消息发送函数中
+    Args:
+        main_window:微信主界面
+        at_members:群内所有at对象,必须是群昵称
+    '''
+    def select(mention_popover:WindowSpecification,member:str):
+        '''
+        微信的@机制必须type_keys打字才可以唤醒,并且是模糊文字匹配(只匹配文字,空格表情都不匹配)
+        若好友的名字中有空格和表情,那么打字的内容只能是第一个空格之前的所有非空格文字,但凡多一个空格
+        就不会唤醒@,同时由于表情不好打字,所以替换掉,出现mention面板然后在弹出的列表里完整匹配
+        '''
+        is_find=True
+        mention_list=mention_popover.child_window(control_type='List',title='')
+        first_item=mention_list.children()[0].window_text()#弹出列表后的第一个人
+        selected_listitem=[listitem for listitem in mention_list.children() if listitem.is_selected()][0]
+        while selected_listitem.window_text()!=member:#一直按着下键找，找到了结束循环，或者遍历完一圈又回到了起点也结束循环(即选中的对象与第一个人名字相同)
+            mention_list.type_keys('{DOWN}')
+            selected_listitem=[listitem for listitem in mention_list.children() if listitem.is_selected()][0]
+            if selected_listitem.window_text()==first_item:
+                is_find=False
+                break
+        return is_find
+        
+    if Tools.is_group_chat(main_window):
+        edit_area=main_window.child_window(**Edits.CurrentChatEdit)
+        mention_popover=main_window.child_window(**Windows.MentionPopOverWindow)
+        for member in at_members:
+            cleaned_member=emoji.replace_emoji(member,'')#去掉emoji
+            cleaned_member=cleaned_member.split(' ')[0]#找到第一个空格字段之前内容
+            edit_area.type_keys(f'@{cleaned_member}')
+            if mention_popover.exists(timeout=0.1):
+                is_find=select(mention_popover,member)
+                if is_find:
+                    edit_area.type_keys('{ENTER}')
+                if not is_find:
+                    pyautogui.press('backspace',presses=len(cleaned_member)+1)
+            else:
+                edit_area.set_text('')
+
+def At_all(main_window:WindowSpecification):
+    '''在群里@所有人'''
+    if Tools.is_group_chat(main_window):
+        edit_area=main_window.child_window(**Edits.CurrentChatEdit)
+        mention_popover=main_window.child_window(**Windows.MentionPopOverWindow)
+        edit_area.type_keys(f'@')
+        if mention_popover.exists(timeout=0.1):
+            mention_list=mention_popover.child_window(control_type='List',title='')
+            first_item=mention_list.children()[0].window_text()#弹出列表后的第一个人
+            if first_item!='所有人':
+                pyautogui.press('backspace',presses=1)
+                print(f'你不是该群群主或管理员,无权@所有人')
+            else:
+                edit_area.type_keys('{ENTER}')
+
 def get_new_message_num(main_window:WindowSpecification=None,is_maximize:bool=None,close_weixin:bool=None):
     '''
     该函数用来获取侧边栏左侧微信按钮上的红色新消息总数
@@ -615,8 +617,7 @@ def get_new_message_num(main_window:WindowSpecification=None,is_maximize:bool=No
     #只能通过id来获取,id是30159，之前是30007,可能是qt组件映射关系不一样
     full_desc=weixin_button.element_info.element.GetCurrentPropertyValue(30159)
     new_message_num=re.search(r'\d+',full_desc)#正则提取数量
-    if close_weixin:
-        main_window.close()
+    if close_weixin:main_window.close()
     return int(new_message_num.group(0)) if new_message_num  else 0
 
 def scan_for_new_messages(main_window:WindowSpecification=None,delay:float=0.3,is_maximize:bool=None,close_weixin:bool=None)->dict:
@@ -700,15 +701,11 @@ def traverse_chat_history_list(chat_history_window:WindowSpecification,select:bo
     runtime_ids=[]
     recorded_num=0
     control_type='CheckBox' if select else 'ListItem'
-    multiselect_item=chat_history_window.child_window(**MenuItems.SelectMenuItem)
     chat_history_list=chat_history_window.child_window(**Lists.ChatHistoryList)
     if select:
-        first_item=[listitem for listitem in chat_history_list.children(control_type='ListItem') if listitem.class_name()!='mmui::ChatItemView'][0]
-        right_clik_pos=first_item.rectangle().left+120,first_item.rectangle().top+50
-        mouse.right_click(coords=right_clik_pos)
-        multiselect_item.click_input()
-        first_item=[listitem for listitem in chat_history_list.children(control_type='CheckBox') if listitem.class_name()!='mmui::ChatItemView'][0]
-        mouse.click(coords=right_clik_pos)
+        first_item=select_chat_history_list(chat_history_window)
+        if first_item is None:
+            raise ValueError(f'该聊天只有系统消息,无法在聊天记录界面中选中任何消息!')
     while recorded_num<number:
         selected=[item for item in chat_history_list.children(control_type=control_type) if item.has_keyboard_focus()]
         if selected and selected[0].class_name()!='mmui::ChatItemView':
@@ -736,20 +733,13 @@ def traverse_chatList(main_window:WindowSpecification,select:bool,number:int):
     runtime_ids=[]
     recorded_num=0
     control_type='CheckBox' if select else 'ListItem'
-    multiselect_item=main_window.child_window(**MenuItems.SelectMenuItem)
     chatList=main_window.child_window(**Lists.FriendChatList)
-    last_item=[listitem for listitem in chatList.children(control_type='ListItem') if listitem.class_name()!='mmui::ChatItemView'][-1]
-    #Tools.activate_chatList(chatList)
     if select:
-        right_clik_pos=last_item.rectangle().left+120,last_item.rectangle().bottom-40
-        mouse.right_click(coords=right_clik_pos)
-        if not multiselect_item.exists(timeout=0.2):
-            right_clik_pos=last_item.rectangle().right-120,last_item.rectangle().bottom-40
-            mouse.right_click(coords=right_clik_pos)
-        multiselect_item.click_input()
-        last_item=[listitem for listitem in chatList.children(control_type='CheckBox') if listitem.class_name()!='mmui::ChatItemView'][-1]
-        mouse.click(coords=right_clik_pos)
-        texts.append(last_item.window_text())
+        last_item=select_chatList(main_window)
+        if last_item is None:
+            raise ValueError(f'该聊天只有系统消息,无法在聊天界面中选中任何消息!')
+        if last_item is not None:
+            texts.append(last_item.window_text())
     while recorded_num<number:
         selected=[item for item in chatList.children(control_type=control_type) if item.has_keyboard_focus()]
         if selected and selected[0].class_name()!='mmui::ChatItemView':
@@ -763,6 +753,61 @@ def traverse_chatList(main_window:WindowSpecification,select:bool,number:int):
     if select:pyautogui.press('esc')
     chatList.type_keys('{END}')
     return texts
+
+def select_chatList(main_window:WindowSpecification)->(ListItemWrapper|None):
+    '''该函数用来选中主界面聊天区域最新一条非系统消息(系统消息不支持选中)'''
+    chatList=main_window.child_window(**Lists.FriendChatList)
+    if not chatList.exists(timeout=0.2):
+        print(f'非正常好友,无法选中消息!')
+        return 
+    activate_position=(chatList.rectangle().right-12,chatList.rectangle().mid_point().y)
+    mouse.click(coords=activate_position)
+    chatList.type_keys('{END}')
+    multiselect_item=main_window.child_window(**MenuItems.SelectMenuItem)
+    while True:
+        selected=[listitem for listitem in chatList.children(control_type='ListItem') if listitem.has_keyboard_focus()]
+        if selected:
+            if selected[0].class_name()!='mmui::ChatItemView':
+                rect=selected[0].rectangle()
+                right_clik_pos=rect.left+120,rect.bottom-40
+                mouse.right_click(coords=right_clik_pos)
+                if not multiselect_item.exists(timeout=0.2):
+                    right_clik_pos=rect.right-120,rect.bottom-40
+                    mouse.right_click(coords=right_clik_pos)
+                multiselect_item.click_input()
+                mouse.click(coords=right_clik_pos)
+                break
+        if not selected:
+            break
+        chatList.type_keys('{UP}')
+    selected=[item for item in chatList.children(control_type='CheckBox')]
+    if selected:return selected[0]
+    return None
+    
+def select_chat_history_list(chat_history_window:WindowSpecification)->(ListItemWrapper|None):
+    '''该函数用来在聊天记录窗口内选中最新一条消息(系统消息不支持选中)'''
+    runtime_ids=[]
+    multiselect_item=chat_history_window.child_window(**MenuItems.SelectMenuItem)
+    chat_history_list=chat_history_window.child_window(**Lists.ChatHistoryList)
+    Tools.activate_chatHistoryList(chat_history_list)
+    while True:
+        selected=[listitem for listitem in chat_history_list.children(control_type='ListItem') if listitem.has_keyboard_focus()]
+        if selected:
+            if selected[0].class_name()!='mmui::ChatItemView':
+                runtime_ids.append(selected[0].element_info.runtime_id)
+                #同一个runtime_id挨着重复出现就说明到底部了无法继续下滑
+                if len(runtime_ids)>2 and runtime_ids[-1]==runtime_ids[-2]:
+                    break
+                rect=selected[0].rectangle()
+                right_clik_pos=rect.left+120,rect.top+50
+                mouse.right_click(coords=right_clik_pos)
+                multiselect_item.click_input()
+                mouse.click(coords=right_clik_pos)
+                break
+        pyautogui.press('down',presses=1,_pause=False)
+    selected=[listitem for listitem in chat_history_list.children(control_type='CheckBox')]
+    if selected:return selected[0]
+    return None
 
 def process_audios(audios:list[str],audio_length:int=60):
     '''

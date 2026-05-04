@@ -477,9 +477,9 @@ class Tools():
         Args:
             chat_history_list:聊天记录列表,即Uielements内的Lists.ChatHistoryList
         '''
-        rectangle=chat_history_list.rectangle()
+        rectangle=chat_history_list.children()[0].rectangle()
         mouse.move(coords=(rectangle.mid_point().x,rectangle.mid_point().y))
-        chat_history_list.type_keys('{HOME}')
+        chat_history_list.type_keys('{HOME}'*2)
         
         
     @staticmethod

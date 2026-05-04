@@ -5,6 +5,9 @@ class NotStartError(Exception):
 class NotLoginError(Exception):
     def __init__(self, Error='微信未登录,请先点击登录后再使用pyweixin!'):
         super().__init__(Error)  
+class NotFoundError(Exception):
+    def __init__(self,Error='无法识别定位到微信主界面,请在微信登录前运行无障碍服务(讲述人)后再尝试!'):
+        super().__init__(Error)
 class NetWorkError(Exception):
     def __init__(self, Error='当前网络不可用,无法进行UI自动化!'):
         super().__init__(Error)
@@ -25,9 +28,6 @@ class NotInstalledError(Exception):
         super().__init__(Error)
 class NotFolderError(Exception):
     def __init__(self,Error='该路径非文件夹,无法保存文件！'):
-        super().__init__(Error)
-class NotFoundError(Exception):
-    def __init__(self,Error='无法识别定位到微信主界面,请在微信登录前运行无障碍服务(讲述人)后再尝试!'):
         super().__init__(Error)
 class NoChatHistoryError(Exception):
     def __init__(self, Error):
