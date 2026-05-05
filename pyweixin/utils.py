@@ -620,6 +620,25 @@ def get_new_message_num(main_window:WindowSpecification=None,is_maximize:bool=No
     if close_weixin:main_window.close()
     return int(new_message_num.group(0)) if new_message_num  else 0
 
+
+def NativeChooseFolder(folder:str):
+    '''
+    该函数用来选择文件保存文件夹路径
+    '''
+    SystemSettings.copy_text_to_clipboard(folder)
+    choose_folder_window=desktop.window(**{'control_type':'Window','framework_id':'Win32','top_level_only':False,'found_index':0})
+    choose_folder_button=choose_folder_window.child_window(control_type='Button',title='选择文件夹')
+    prograss_bar=choose_folder_window.child_window(control_type='ProgressBar',class_name='msctls_progress32',framework_id='Win32')
+    path_bar=prograss_bar.child_window(class_name='ToolbarWindow32',control_type='ToolBar',found_index=0)
+    if re.search(r':\s*(.*)',path_bar.window_text()).group(1)!=folder:
+        rec=path_bar.rectangle()
+        mouse.click(coords=(rec.right-5,int(rec.top+rec.bottom)//2))
+        pyautogui.press('backspace')
+        pyautogui.hotkey('ctrl','v',_pause=False)
+        pyautogui.press('enter')
+        time.sleep(0.5)
+    choose_folder_button.click_input()
+    
 def scan_for_new_messages(main_window:WindowSpecification=None,delay:float=0.3,is_maximize:bool=None,close_weixin:bool=None)->dict:
     '''
     该函数用来扫描检查一遍会话列表中的所有新消息,返回发送对象以及新消息数量(不包括免打扰)
@@ -688,7 +707,7 @@ def scan_for_new_messages(main_window:WindowSpecification=None,delay:float=0.3,i
         main_window.close()
     return newMessages_dict
 
-def traverse_chat_history_list(chat_history_window:WindowSpecification,select:bool,number:int):
+def traverse_chat_history_list(chat_history_window:WindowSpecification,select:bool,number:int,save_media:bool=False,media_folder:str=None):
     '''该函数用于遍历聊天记录列表获取指定数量文本
     Args:
         chat_history_window:聊天记录窗口
@@ -697,15 +716,17 @@ def traverse_chat_history_list(chat_history_window:WindowSpecification,select:bo
     Returns:
         texts:指定数量的聊天记录文本
     '''
+    recorded_num=0
+    media_count=0
     texts=[]
     runtime_ids=[]
-    recorded_num=0
+    image_label=Special_Labels.Image
+    video_label=Special_Labels.Video
     control_type='CheckBox' if select else 'ListItem'
     chat_history_list=chat_history_window.child_window(**Lists.ChatHistoryList)
     if select:
-        first_item=select_chat_history_list(chat_history_window)
-        if first_item is None:
-            raise ValueError(f'该聊天只有系统消息,无法在聊天记录界面中选中任何消息!')
+        latest_message=select_chat_history_list(chat_history_window)
+        if latest_message is None:raise ValueError(f'该聊天只有系统消息,无法在聊天记录界面中选中任何消息!')
     while recorded_num<number:
         selected=[item for item in chat_history_list.children(control_type=control_type) if item.has_keyboard_focus()]
         if selected and selected[0].class_name()!='mmui::ChatItemView':
@@ -713,10 +734,18 @@ def traverse_chat_history_list(chat_history_window:WindowSpecification,select:bo
             #同一个runtime_id挨着重复出现就说明到底部了无法继续下滑
             if len(runtime_ids)>2 and runtime_ids[-1]==runtime_ids[-2]:
                 break
+            if selected[0].class_name()=='mmui::ChatBubbleReferItemView' and select and save_media:
+                if video_label in selected[0].window_text() or image_label in selected[0].window_text():
+                    pyautogui.press('enter')
+                    media_count+=1
             texts.append(selected[0].window_text())
             recorded_num+=1
         pyautogui.press('down',presses=1,_pause=False)
-    if select:pyautogui.press('esc')
+    if select and save_media and media_count and media_folder is not None:
+        save_button=chat_history_window.child_window(**Buttons.SaveButton)
+        save_button.click_input()
+        NativeChooseFolder(media_folder)
+    if select and not media_count:pyautogui.press('esc')
     chat_history_list.type_keys('{HOME}')
     return texts
 
@@ -756,6 +785,7 @@ def traverse_chatList(main_window:WindowSpecification,select:bool,number:int):
 
 def select_chatList(main_window:WindowSpecification)->(ListItemWrapper|None):
     '''该函数用来选中主界面聊天区域最新一条非系统消息(系统消息不支持选中)'''
+    main_window.restore()
     chatList=main_window.child_window(**Lists.FriendChatList)
     if not chatList.exists(timeout=0.2):
         print(f'非正常好友,无法选中消息!')
