@@ -398,7 +398,7 @@ class TimeStamp():
             month_label=re.sub(r'年0','年',month_label)
         return month_label
 
-class ContentSender():
+class Messages():
     '''发送消息的一些操作,传入的参数是main_window(微信),且不涉及关闭微信窗口,便于个人二次开发'''
     @staticmethod
     def send_messages_to_friend(main_window:WindowSpecification,messages:list[str],send_delay:float=None):
@@ -623,7 +623,7 @@ def get_new_message_num(main_window:WindowSpecification=None,is_maximize:bool=No
 
 def NativeChooseFolder(folder:str):
     '''
-    该函数用来选择文件保存文件夹路径
+    该函数用来在微信点击保存按钮后弹出的windows界面中保存文件
     '''
     SystemSettings.copy_text_to_clipboard(folder)
     choose_folder_window=desktop.window(**{'control_type':'Window','framework_id':'Win32','top_level_only':False,'found_index':0})
@@ -707,21 +707,128 @@ def scan_for_new_messages(main_window:WindowSpecification=None,delay:float=0.3,i
         main_window.close()
     return newMessages_dict
 
-def traverse_chat_history_list(chat_history_window:WindowSpecification,select:bool,number:int,save_media:bool=False,media_folder:str=None):
-    '''该函数用于遍历聊天记录列表获取指定数量文本
+def parse_chat_history(friend:str,myName:str,texts_with_name:list[str])->tuple[list,list,list]:
+    '''私聊聊天记录消息解析,不是对方发送就是个人发送
+    Args:
+        friend:好友名称
+        myName:本人昵称(Contacts.check_my_info)
+        texts_with_name:开启多选遍历得到的文本(traverse_chat_histor_list)
+    Returns:
+        (contents,senders,timestamps):消息内容,消息发送人,时间戳
+    '''
+    senders=[]
+    contents=[]
+    timestamps=[]
+    timestamp_pattern=Regex_Patterns.Chathistory_Timestamp_pattern
+    for text in texts_with_name:
+        timestamp=timestamp_pattern.search(text).group(0) if timestamp_pattern.search(text) else '红包或转账(无法获取时间戳)'
+        text=timestamp_pattern.sub('',text)
+        if timestamp=='红包或转账(无法获取时间戳)':
+            sender='红包或转账(无法获取发送人)'
+            content=text
+        else:
+            sender=friend if re.search(rf'^{friend}\s',text) is not None else myName
+            content=re.sub(rf'^{sender}\s','',text)
+        senders.append(sender)
+        contents.append(content)
+        timestamps.append(timestamp)
+    return contents,senders,timestamps
+
+def parse_group_chat_history(texts_with_name:list[str],texts_without_name:list[str],groupMembers:list[str])->tuple[list,list,list]:
+    '''群聊内的聊天记录解析
+    Args:
+        texts_with_name:开启多选遍历得到的文本(traverse_chat_history_list)
+        texts_without_name:不开启多选遍历得到的文本(traverse_chat_history_list)
+        groupMembers:群成员昵称列表(Contacts.get_groupMembers_info)
+    Returns:
+        (contents,senders,timestamps):消息内容,消息发送人,时间戳
+    '''
+    senders=[]
+    contents=[]
+    timestamps=[]
+    timestamp_pattern=Regex_Patterns.Chathistory_Timestamp_pattern
+    if groupMembers:
+        for text in texts_with_name:
+            timestamp=timestamp_pattern.search(text).group(0) if timestamp_pattern.search(text) else '红包或转账(无法获取时间戳)'
+            if timestamp=='红包或转账(无法获取时间戳)':
+                sender='红包或转账(无法获取发送人)'
+            else:
+                for groupMember in groupMembers:
+                    search_result=re.search(rf'^({re.escape(groupMember)})\s',text)
+                    if search_result is not None:
+                        sender=search_result.group(1)
+                        content=timestamp_pattern.sub('',text).replace(sender,'')
+            senders.append(sender)
+            contents.append(content)
+            timestamps.append(timestamp)
+    else:
+        for text_with_name,text_without_name in zip(texts_with_name,texts_without_name):
+            timestamp=timestamp_pattern.search(text_without_name).group(0) if timestamp_pattern.search(text_without_name) else '红包或转账(无法获取时间戳)'
+            content=timestamp_pattern.sub('',text_without_name)
+            if timestamp=='红包或转账(无法获取时间戳)':
+                sender='红包或转账(无法获取发送人)'
+            else:
+                sender=text_with_name.replace(text_without_name,'').strip()
+                sender=timestamp_pattern.sub('',sender).replace(content,'')
+            senders.append(sender)
+            contents.append(content)
+            timestamps.append(timestamp)
+    return contents,senders,timestamps
+
+def parse_messages(friend:str,myName:str,texts_with_name:list[str]):
+    '''私聊解析聊天界面内的信息,不是自己发的就是对方发的
+    Args:
+        friend:好友名称
+        myName:本人昵称(Contacts.check_my_info)
+        texts_with_name:开启多选遍历得到的文本(traverse_chatList)
+    Returns:
+        (contents,senders,timestamps):消息内容,消息发送人,时间戳
+    '''
+    senders=[]
+    contents=[]
+    for text in texts_with_name:
+        sender=friend if re.search(rf'^{re.escape(friend)}\s',text) is not None else myName
+        content=re.sub(rf'^{sender}\s','',text)
+        senders.append(sender)
+        contents.append(content)
+    return contents,senders
+
+def parse_group_messages(texts_with_name:list[str],texts_without_name:list[str]):
+    '''群聊提取信息
+    Args:
+        texts_with_name:开启多选遍历得到的文本(traverse_chatList)
+        texts_without_name:不开启多选遍历得到的文本(traverse_chatList)
+    Returns:
+        (contents,senders):消息内容,消息发送人,时间戳
+    '''
+    senders=[]
+    contents=[]
+    for text_with_name,text_without_name in zip(texts_with_name,texts_without_name):
+        sender=text_with_name.replace(text_without_name,'').strip()
+        if sender=='':sender='红包或转账(无法获取发送人)'
+        senders.append(sender)
+        contents.append(text_without_name)
+    return contents,senders
+
+def traverse_chat_history_list(chat_history_window:WindowSpecification,select:bool,number:int,save_detail:bool=False,target_folder:str=None):
+    '''该函数用于遍历聊天记录列表获取指定数量文本,并在选中状态下保存图片视频与文件
     Args:
         chat_history_window:聊天记录窗口
         select:是否在选中的状态下遍历
+        save_detail:是否保存图片、视频、文件
+        target_folder:保存图片、视频、文件的文件夹
         number:指定数量条聊天记录
     Returns:
         texts:指定数量的聊天记录文本
     '''
-    recorded_num=0
+    file_count=0
     media_count=0
+    recorded_num=0
     texts=[]
     runtime_ids=[]
     image_label=Special_Labels.Image
     video_label=Special_Labels.Video
+    file_label=Special_Labels.File
     control_type='CheckBox' if select else 'ListItem'
     chat_history_list=chat_history_window.child_window(**Lists.ChatHistoryList)
     if select:
@@ -734,18 +841,22 @@ def traverse_chat_history_list(chat_history_window:WindowSpecification,select:bo
             #同一个runtime_id挨着重复出现就说明到底部了无法继续下滑
             if len(runtime_ids)>2 and runtime_ids[-1]==runtime_ids[-2]:
                 break
-            if selected[0].class_name()=='mmui::ChatBubbleReferItemView' and select and save_media:
+            if selected[0].class_name()=='mmui::ChatBubbleReferItemView' and select and save_detail:
                 if video_label in selected[0].window_text() or image_label in selected[0].window_text():
                     pyautogui.press('enter')
                     media_count+=1
+                if file_label in selected[0].window_text():
+                    pyautogui.press('enter')
+                    file_count+=1
             texts.append(selected[0].window_text())
             recorded_num+=1
         pyautogui.press('down',presses=1,_pause=False)
-    if select and save_media and media_count and media_folder is not None:
+    savable_item_count=file_count+media_count
+    if select and save_detail and savable_item_count!=0 and target_folder is not None:
         save_button=chat_history_window.child_window(**Buttons.SaveButton)
         save_button.click_input()
-        NativeChooseFolder(media_folder)
-    if select and not media_count:pyautogui.press('esc')
+        NativeChooseFolder(target_folder)
+    if select and savable_item_count==0:pyautogui.press('esc')
     chat_history_list.type_keys('{HOME}')
     return texts
 
@@ -769,6 +880,7 @@ def traverse_chatList(main_window:WindowSpecification,select:bool,number:int):
             raise ValueError(f'该聊天只有系统消息,无法在聊天界面中选中任何消息!')
         if last_item is not None:
             texts.append(last_item.window_text())
+            recorded_num+=1
     while recorded_num<number:
         selected=[item for item in chatList.children(control_type=control_type) if item.has_keyboard_focus()]
         if selected and selected[0].class_name()!='mmui::ChatItemView':
@@ -811,8 +923,11 @@ def select_chatList(main_window:WindowSpecification)->(ListItemWrapper|None):
             break
         chatList.type_keys('{UP}')
     selected=[item for item in chatList.children(control_type='CheckBox')]
-    if selected:return selected[0]
-    return None
+    if selected:
+        return selected[-1]
+    else:
+        print(f'未能在该聊天界面中找到任何可选中的消息,请自行发送一条消息后再尝试!')
+        return None
     
 def select_chat_history_list(chat_history_window:WindowSpecification)->(ListItemWrapper|None):
     '''该函数用来在聊天记录窗口内选中最新一条消息(系统消息不支持选中)'''
