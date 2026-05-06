@@ -243,7 +243,7 @@ class Call():
             if close_weixin:main_window.close()
             if wait:
                 try:
-                    duration_label=VoipCall_window.child_window(class_name="mmui::VOIPDurationTextView").wait(wait_for='ready',timeout=50)
+                    duration_label=VoipCall_window.child_window(class_name="mmui::VOIPDurationTextView").wait(wait_for='ready',timeout=55)
                     return VoipCall_window
                 except Exception:
                     print(f'本次通话已挂断!')
@@ -284,7 +284,7 @@ class Call():
             if close_weixin:main_window.close()
             if wait:
                 try:
-                    duration_label=VoipCall_window.child_window(class_name="mmui::VOIPDurationTextView").wait(wait_for='ready',timeout=50)
+                    duration_label=VoipCall_window.child_window(class_name="mmui::VOIPDurationTextView").wait(wait_for='ready',timeout=55)
                     return VoipCall_window
                 except Exception:
                     print(f'本次通话已挂断!')
@@ -2491,17 +2491,15 @@ class Moments():
         if content is None and not files:
             raise ValueError(f'笔记中文本或文件至少要有一个!')
         note_window=Navigator.open_note(is_maximize=is_maximize,close_weixin=close_weixin)
-        Tools.cancel_pin(note_window)#取消指定
-        edit_area=note_window.child_window(auto_id='xeditorInputId')
-        edit_area.set_text('')
-        if isinstance(content,str):
-            edit_area.set_text(content)
+        edit_area=note_window.child_window(control_type='Edit')
+        edit_area.set_text(content)
         if files:
             SystemSettings.copy_files_to_clipboard(files)
             pyautogui.hotkey('ctrl','v')
         edit_area.click_input()
         pyautogui.hotkey('ctrl','s')
         time.sleep(5)#等待保存
+        Tools.cancel_pin(note_window)
         container=note_window.child_window(auto_id='mainContainer')
         more_button_area=container.rectangle().right-60,container.rectangle().top+60
         mouse.click(coords=more_button_area)
@@ -2510,13 +2508,14 @@ class Moments():
         time.sleep(2)
         publish_panel=note_window.child_window(**Windows.SnsPublishWindow)
         publish_panel.restore()
+        note_window.close()
         if text:
             text_input=publish_panel.child_window(**Edits.SnsEdit)
             text_input.click_input()
             text_input.set_text(text)
         post_button=publish_panel.child_window(**Buttons.PostButton)
         post_button.click_input()
-        note_window.close()
+       
 
     @staticmethod
     def dump_recent_posts(recent:Literal['Today','Yesterday','Week','Month']='Today',number:int=None,is_maximize:bool=None,close_weixin:bool=None)->list[dict]:

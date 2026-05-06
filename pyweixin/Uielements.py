@@ -715,7 +715,7 @@ class Window_Control():
         self.AddfriendWindow={'control_type':'Window','class_name':'mmui::AddFriendWindow'}#添加好友窗口
         self.SearchChatHistoryWindow={'control_type':'Window','auto_id':'GlobalSearchMsgWindow'}#聊天记录搜索窗口
         self.SnsPublishWindow={'auto_id':'SnsPublishPanel','control_type':'Window'}#微信朋友圈后发布按钮点击后的面板
-        self.VoipCallWindow={'class_name':'mmui::VOIPWindow'}#接通语音或视频电话后的通话窗口
+        self.VoipCallWindow={'class_name':'mmui::VOIPWindow','top_level_only':False}#接通语音或视频电话后的通话窗口
         if self.language=='简体中文':
             self.MomentsWindow={'title':'朋友圈','control_type':'Window','class_name':'mmui::SNSWindow'}#好友朋友圈窗口
             self.SessionPickerWindow={'control_type':'Window','title':'微信发送给','class_name':'mmui::SessionPickerWindow'}#转发消息的session_picker_window
