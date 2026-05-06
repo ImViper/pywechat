@@ -832,7 +832,7 @@ def traverse_chat_history_list(chat_history_window:WindowSpecification,select:bo
     control_type='CheckBox' if select else 'ListItem'
     chat_history_list=chat_history_window.child_window(**Lists.ChatHistoryList)
     if select:
-        latest_message=select_chat_history_list(chat_history_window)
+        latest_message=Tools.select_chat_history_list(chat_history_window)
         if latest_message is None:raise ValueError(f'该聊天只有系统消息,无法在聊天记录界面中选中任何消息!')
     while recorded_num<number:
         selected=[item for item in chat_history_list.children(control_type=control_type) if item.has_keyboard_focus()]
@@ -875,7 +875,7 @@ def traverse_chatList(main_window:WindowSpecification,select:bool,number:int):
     control_type='CheckBox' if select else 'ListItem'
     chatList=main_window.child_window(**Lists.FriendChatList)
     if select:
-        last_item=select_chatList(main_window)
+        last_item=Tools.select_chatList(main_window)
         if last_item is None:
             raise ValueError(f'该聊天只有系统消息,无法在聊天界面中选中任何消息!')
         if last_item is not None:
@@ -894,65 +894,6 @@ def traverse_chatList(main_window:WindowSpecification,select:bool,number:int):
     if select:pyautogui.press('esc')
     chatList.type_keys('{END}')
     return texts
-
-def select_chatList(main_window:WindowSpecification)->(ListItemWrapper|None):
-    '''该函数用来选中主界面聊天区域最新一条非系统消息(系统消息不支持选中)'''
-    main_window.restore()
-    chatList=main_window.child_window(**Lists.FriendChatList)
-    if not chatList.exists(timeout=0.2):
-        print(f'非正常好友,无法选中消息!')
-        return 
-    activate_position=(chatList.rectangle().right-12,chatList.rectangle().mid_point().y)
-    mouse.click(coords=activate_position)
-    chatList.type_keys('{END}')
-    multiselect_item=main_window.child_window(**MenuItems.SelectMenuItem)
-    while True:
-        selected=[listitem for listitem in chatList.children(control_type='ListItem') if listitem.has_keyboard_focus()]
-        if selected:
-            if selected[0].class_name()!='mmui::ChatItemView':
-                rect=selected[0].rectangle()
-                right_clik_pos=rect.left+120,rect.bottom-60
-                mouse.right_click(coords=right_clik_pos)
-                if not multiselect_item.exists(timeout=0.2):
-                    right_clik_pos=rect.right-120,rect.bottom-60
-                    mouse.right_click(coords=right_clik_pos)
-                multiselect_item.click_input()
-                mouse.click(coords=right_clik_pos)
-                break
-        if not selected:
-            break
-        chatList.type_keys('{UP}')
-    selected=[item for item in chatList.children(control_type='CheckBox')]
-    if selected:
-        return selected[-1]
-    else:
-        print(f'未能在该聊天界面中找到任何可选中的消息,请自行发送一条消息后再尝试!')
-        return None
-    
-def select_chat_history_list(chat_history_window:WindowSpecification)->(ListItemWrapper|None):
-    '''该函数用来在聊天记录窗口内选中最新一条消息(系统消息不支持选中)'''
-    runtime_ids=[]
-    multiselect_item=chat_history_window.child_window(**MenuItems.SelectMenuItem)
-    chat_history_list=chat_history_window.child_window(**Lists.ChatHistoryList)
-    Tools.activate_chatHistoryList(chat_history_list)
-    while True:
-        selected=[listitem for listitem in chat_history_list.children(control_type='ListItem') if listitem.has_keyboard_focus()]
-        if selected:
-            if selected[0].class_name()!='mmui::ChatItemView':
-                runtime_ids.append(selected[0].element_info.runtime_id)
-                #同一个runtime_id挨着重复出现就说明到底部了无法继续下滑
-                if len(runtime_ids)>2 and runtime_ids[-1]==runtime_ids[-2]:
-                    break
-                rect=selected[0].rectangle()
-                right_clik_pos=rect.left+120,rect.top+50
-                mouse.right_click(coords=right_clik_pos)
-                multiselect_item.click_input()
-                mouse.click(coords=right_clik_pos)
-                break
-        pyautogui.press('down',presses=1,_pause=False)
-    selected=[listitem for listitem in chat_history_list.children(control_type='CheckBox')]
-    if selected:return selected[0]
-    return None
 
 def process_audios(audios:list[str],audio_length:int=60):
     '''

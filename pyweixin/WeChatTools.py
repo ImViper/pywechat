@@ -622,6 +622,67 @@ class Tools():
             if next_item is not None and next_item.class_name()!="mmui::ContactsCellGroupView":
                 contact_item.click_input()
     @staticmethod
+    def select_chatList(main_window:WindowSpecification)->(ListItemWrapper|None):
+        '''该方法用来选中主界面聊天区域最新一条非系统消息(系统消息不支持选中)'''
+        main_window.restore()
+        chatList=main_window.child_window(**Lists.FriendChatList)
+        if not chatList.exists(timeout=0.2):
+            print(f'非正常好友,无法选中消息!')
+            return 
+        activate_position=(chatList.rectangle().right-12,chatList.rectangle().mid_point().y)
+        mouse.click(coords=activate_position)
+        chatList.type_keys('{END}')
+        multiselect_item=main_window.child_window(**MenuItems.SelectMenuItem)
+        while True:
+            selected=[listitem for listitem in chatList.children(control_type='ListItem') if listitem.has_keyboard_focus()]
+            if selected:
+                if selected[0].class_name()!='mmui::ChatItemView':
+                    rect=selected[0].rectangle()
+                    right_clik_pos=rect.left+120,rect.bottom-60
+                    mouse.right_click(coords=right_clik_pos)
+                    if not multiselect_item.exists(timeout=0.2):
+                        right_clik_pos=rect.right-120,rect.bottom-60
+                        mouse.right_click(coords=right_clik_pos)
+                    multiselect_item.click_input()
+                    mouse.click(coords=right_clik_pos)
+                    break
+            if not selected:
+                break
+            chatList.type_keys('{UP}')
+        selected=[item for item in chatList.children(control_type='CheckBox')]
+        if selected:
+            return selected[-1]
+        else:
+            print(f'未能在该聊天界面中找到任何可选中的消息,请自行发送一条消息后再尝试!')
+            return None
+    
+    @staticmethod
+    def select_chat_history_list(chat_history_window:WindowSpecification)->(ListItemWrapper|None):
+        '''该方法用来在聊天记录窗口内选中最新一条消息(系统消息不支持选中)'''
+        runtime_ids=[]
+        multiselect_item=chat_history_window.child_window(**MenuItems.SelectMenuItem)
+        chat_history_list=chat_history_window.child_window(**Lists.ChatHistoryList)
+        Tools.activate_chatHistoryList(chat_history_list)
+        while True:
+            selected=[listitem for listitem in chat_history_list.children(control_type='ListItem') if listitem.has_keyboard_focus()]
+            if selected:
+                if selected[0].class_name()!='mmui::ChatItemView':
+                    runtime_ids.append(selected[0].element_info.runtime_id)
+                    #同一个runtime_id挨着重复出现就说明到底部了无法继续下滑
+                    if len(runtime_ids)>2 and runtime_ids[-1]==runtime_ids[-2]:
+                        break
+                    rect=selected[0].rectangle()
+                    right_clik_pos=rect.left+120,rect.top+50
+                    mouse.right_click(coords=right_clik_pos)
+                    multiselect_item.click_input()
+                    mouse.click(coords=right_clik_pos)
+                    break
+            pyautogui.press('down',presses=1,_pause=False)
+        selected=[listitem for listitem in chat_history_list.children(control_type='CheckBox')]
+        if selected:return selected[0]
+        return None
+    
+    @staticmethod
     def match_duration(duration:str)->float:
         '''
         该函数用来将字符串类型的时间段转换为秒
@@ -1123,9 +1184,6 @@ class Navigator():
         current_chat=main_window.child_window(**current_chat_label)
         #如果当前主界面聊天界面顶部的名称为好友名称，直接返回结果
         if current_chat.exists(timeout=0.2):
-            edit_area=main_window.child_window(**Edits.CurrentChatEdit)
-            if edit_area.exists(timeout=0.2) and edit_area.is_visible():
-                edit_area.click_input()
             return main_window
         else:#否则直接从顶部搜索栏出搜索结果
             search=main_window.descendants(**Edits.SearchEdit)[0]
@@ -1140,9 +1198,6 @@ class Navigator():
                 search_mobile=None
             if search_result and not search_mobile:#有搜索结果没有网络查找qq号手机号选项
                 search_result.click_input()
-                edit_area=main_window.child_window(**Edits.CurrentChatEdit)
-                if edit_area.exists(timeout=0.2) and edit_area.is_visible():
-                    edit_area.click_input()
                 return main_window
             if not search_result and search_mobile:#没有搜索结果，有网络查找qq号手机号选项
                 search_mobile[0].click_input()
@@ -1151,9 +1206,6 @@ class Navigator():
                 if send_msg_button.exists(timeout=2):#有发送消息按钮说明不是新朋友不需要添加
                     send_msg_button.click_input()
                     add_friend_window.close()
-                    edit_area=main_window.child_window(**Edits.CurrentChatEdit)
-                    if edit_area.exists() and edit_area.is_visible():
-                        edit_area.click_input()
                 else:
                     add_friend_window.close()
                     chat_button.click_input()
@@ -1166,11 +1218,12 @@ class Navigator():
                 raise NoSuchFriendError
 
     @staticmethod                    
-    def open_dialog_window(friend:str,is_maximize:bool=None,search_pages:int=None)->WindowSpecification: 
+    def open_dialog_window(friend:str,select:bool=False,is_maximize:bool=None,search_pages:int=None)->WindowSpecification: 
         '''
         该方法用于打开某个好友(非公众号)的聊天窗口
         Args:
             friend:好友或群聊备注名称,需提供完整名称
+            select:是否选中最新一条消息,开启多选状态
             is_maximize:微信界面是否全屏,默认不全屏
             search_pages:在会话列表中查询查找好友时滚动列表的次数,默认为5,一次可查询5-12人,当search_pages为0时,直接从顶部搜索栏搜索好友信息打开聊天界面
         Returns:
@@ -1189,23 +1242,24 @@ class Navigator():
             is_find,main_window=Navigator.find_friend_in_SessionList(friend=friend,is_maximize=is_maximize,search_pages=search_pages)
             #is_find为True,即说明find_friend_in_SessionList找到了聊天窗口,直接返回结果
             if is_find:
-                edit_area=main_window.child_window(**Edits.CurrentChatEdit)
-                if edit_area.exists(timeout=0.2) and edit_area.is_visible():
-                    edit_area.click_input()
+                if select:Tools.select_chatList(main_window)
                 return main_window
             #is_find为False没有在会话列表中找到好友,在顶部搜索栏中搜索好友
             main_window=Navigator.search_friend(friend=friend,is_maximize=is_maximize)
+            if select:Tools.select_chatList(main_window)
             return main_window
         else: #searchpages为0，在顶部搜索栏中搜索好友
             main_window=Navigator.search_friend(friend=friend,is_maximize=is_maximize)
+            if select:Tools.select_chatList(main_window)
             return main_window
     
     @staticmethod
-    def open_seperate_dialog_window(friend:str,is_maximize:bool=None,window_minimize:bool=False,close_weixin:bool=None)->WindowSpecification:
+    def open_seperate_dialog_window(friend:str,select:bool=False,is_maximize:bool=None,window_minimize:bool=False,close_weixin:bool=None)->WindowSpecification:
         '''
         该方法用于单独打开某个好友(非公众号)的聊天窗口(主要用于监听消息)
         Args:
             friend:好友或群聊备注名称,需提供完整名称
+            select:是否选中最新一条消息,开启多选状态
             is_maximize:微信界面是否全屏,默认不全屏
             window_minimize:独立聊天窗口是否最小化(监听消息方便),默认不最小
             search_pages:在会话列表中查询查找好友时滚动列表的次数,默认为5,一次可查询5-12人,当search_pages为0时,直接从顶部搜索栏搜索好友信息打开聊天界面
@@ -1277,10 +1331,10 @@ class Navigator():
                 friend_listitem=[listitem for listitem in session_list.children(control_type='ListItem') if listitem.is_selected()][0]
                 friend_listitem.double_click_input()
             dialog_window=Tools.move_window_to_center(Window={'class_name':'mmui::ChatSingleWindow','title':f'{friend}'})
+            if select:Tools.select_chatList(dialog_window)
             if window_minimize:
                 win32gui.SendMessage(dialog_window.handle, win32con.WM_SYSCOMMAND, win32con.SC_MINIMIZE, 0)
-            if close_weixin:
-                main_window.close()
+            if close_weixin:main_window.close()
             return dialog_window
         else:#搜索结果栏中没有关于传入参数friend好友昵称或备注的搜索结果，关闭主界面,引发NosuchFriend异常
             chat_button.click_input()

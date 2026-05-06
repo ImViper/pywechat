@@ -4243,7 +4243,7 @@ class Monitor():
             >>> for friend,result in zip(friends,results):
             >>>    print(friend,result)
         Returns:
-            details:该聊天窗口内的新消息(文本内容),格式为{'新消息总数':x,'文本数量':x,'文件数量':x,'图片数量':x,'视频数量':x,'链接数量':x,'文本内容':x}
+            details:该聊天窗口内的新消息(文本内容),格式为{'新消息总数':x,'文本数量':x,'文件数量':x,'图片数量':x,'视频数量':x,'链接数量':x,'文本内容':x,'消息发送人':x}
         '''
         def extract_info(texts):
             senders=[]
@@ -4308,6 +4308,7 @@ class Monitor():
         if not chatList.children(control_type='CheckBox'):initial_runtime_id=0
         end_timestamp=time.time()+duration#根据秒数计算截止时间
         SystemSettings.open_listening_mode(volume=False)
+        print(end_timestamp)
         while time.time()<end_timestamp:
             newMessage=chatList.children(control_type='CheckBox')[-1]
             runtime_id=newMessage.element_info.runtime_id
@@ -4333,7 +4334,7 @@ class Monitor():
         #最后结束时再批量复制到target_folder,不在循环里逐个复制是考虑到若文件过大(几百mb)没有自动下载完成移动不了
         if save_file and files:SystemSettings.copy_files(files,file_folder)#文件复制粘贴到target_folder/Files内
         if save_media and media_count:Messages.save_media(friend=friend,number=media_count,target_folder=target_folder)#保存图片到target_folder/Images内
-        details={'新消息总数':total,'文本数量':len(texts),'文件数量':len(files),'图片数量':image_count,'视频数量':video_count,'链接数量':link_count,'文本内容':contents,'发送人':senders,'出入群通知':memberEvents}
+        details={'新消息总数':total,'文本数量':len(texts),'文件数量':len(files),'图片数量':image_count,'视频数量':video_count,'链接数量':link_count,'文本内容':contents,'消息发送人':senders,'出入群通知':memberEvents}
         if close_dialog_window:dialog_window.close()
         return details
 

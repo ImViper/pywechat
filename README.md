@@ -109,23 +109,13 @@ print(Tools.about_weixin())
 ```
 <br>
 
-#### 多线程监听消息
+#### 监听消息
 ```
-#多线程打开多个好友窗口进行消息监听
-from concurrent.futures import ThreadPoolExecutor
-from pyweixin import Navigator,Monitor
-#先打开所有好友的独立窗口
-dialog_windows=[]
-friends=['Hello,Mr Crab','Pywechat测试群',]
-durations=['1min']*len(friends)
-#不添加其他参数Monitor.listen_on_chat,比如save_photos,该操作涉及键鼠,无法多线程，只是监听消息，获取文本内容,移动保存文件还是可以的
-for friend in friends:
-dialog_window=Navigator.open_seperate_dialog_window(friend=friend,window_minimize=True,close_weixin=True)#window_minimize独立窗口最小化
-    dialog_windows.append(dialog_window)
-with ThreadPoolExecutor(max_workers=len(friends)) as pool:
-    results=pool.map(lambda args: Monitor.listen_on_chat(*args),list(zip(dialog_windows,durations)))
-for friend,result in zip(friends,results):
-    print(friend,result)
+from pyweixin import Monitor,Navigator
+#select设置为True可以获取到消息发送人,window_minimize最小化不影响正常办公
+dialog_window=Navigator.open_seperate_dialog_window(friend='小号测试',select=True,window_minimize=True)
+result=Monitor.listen_on_chat(dialog_window=dialog_window,duration='1min',save_file=True)
+print(result)
 ```
 <br>
 
@@ -171,7 +161,7 @@ for friend,result in zip(friends,results):
 from pyweixin import Navigator,Monitor
 dialog_window=Navigator.open_seperate_dialog_window(friend='啦啦啦')
 result=Monitor.listen_on_chat(dialog_window=dialog_window,duration='30s')
-print(result)#返回值 {'新消息总数':x,'文本数量':x,'文件数量':x,'图片数量':x,'视频数量':x,'链接数量':x,'文本内容':x}
+print(result)#返回值 {'新消息总数':x,'文本数量':x,'文件数量':x,'图片数量':x,'视频数量':x,'链接数量':x,'文本内容':x,'消息发送人':x}
 ```
 
 <br>
