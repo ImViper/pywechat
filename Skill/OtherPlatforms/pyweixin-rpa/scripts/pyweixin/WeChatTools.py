@@ -128,7 +128,7 @@ class Tools():
         wxid=Tools.get_current_wxid()
         version=GlobalConfig.Version
         language=GlobalConfig.language
-        chatfiles_folder=Tools.where_chatfile_folder()
+        chatfiles_folder=Tools.where_chatfiles_folder()
         return {'exe路径':exe_path,'版本':version,'语言':language,'wxid':wxid,'wxid目录':wxid_folder,'微信配置目录':userlib_folder,'聊天文件目录':chatfiles_folder}
 
     @staticmethod
@@ -240,7 +240,7 @@ class Tools():
         return db_storage
 
     @staticmethod
-    def where_chatfile_folder(open_folder:bool=False)->str:
+    def where_chatfiles_folder(open_folder:bool=False)->str:
         '''
         该方法用来获取微信聊天文件存放路径(文件夹)
         使用时微信必须登录,否则无法获取到路径
@@ -575,8 +575,12 @@ class Tools():
             return None
         newfriend_item=main_window.child_window(**ListItems.NewFriendListItem)
         group_item=main_window.child_window(**ListItems.SavedGroupsListIte)
-        official_item=main_window.child_window(**ListItems.OfficialAccountsListItem)
-        service_item=main_window.child_window(**ListItems.ServiceAccountsListItem)
+        if version.parse(GlobalConfig.Version)>version.parse('4.1.11'):
+            offAcc_item=main_window.child_window(**ListItems.offAndSerAccListItem)
+            serAcc_item=main_window.child_window(**ListItems.offAndSerAccListItem)
+        else:
+            offAcc_item=main_window.child_window(**ListItems.OffAccListItem)
+            serAcc_item=main_window.child_window(**ListItems.SerAccListItem)
         wecom_item=main_window.child_window(**ListItems.WeComContactsListItems)
         mycom_item=main_window.child_window(**ListItems.MyEnterPriseListItems)
         contact_item=main_window.child_window(**ListItems.ContactsListItem)
@@ -588,14 +592,14 @@ class Tools():
             next_item=get_next_item(group_item)
             if next_item is not None and next_item.class_name()!="mmui::ContactsCellGroupView":
                 group_item.click_input()
-        if official_item.exists(timeout=0.1):
-            next_item=get_next_item(official_item)
+        if offAcc_item.exists(timeout=0.1):
+            next_item=get_next_item(offAcc_item)
             if next_item is not None and next_item.class_name()!="mmui::ContactsCellGroupView":
-               official_item.click_input()
-        if service_item.exists(timeout=0.1):
-            next_item=get_next_item(service_item)
+               offAcc_item.click_input()
+        if serAcc_item.exists(timeout=0.1):
+            next_item=get_next_item(serAcc_item)
             if next_item is not None and next_item.class_name()!="mmui::ContactsCellGroupView":
-                service_item.click_input()
+                serAcc_item.click_input()
         if wecom_item.exists(timeout=0.1):
             next_item=get_next_item(wecom_item)
             if next_item is not None and next_item.class_name()!="mmui::ContactsCellGroupView":
@@ -625,10 +629,16 @@ class Tools():
             if selected:
                 if selected[0].class_name()!='mmui::ChatItemView':
                     ChatListSelectPos=MousePos(selected[0]).ChatListSelectPos
-                    mouse.right_click(coords=ChatListSelectPos)
-                    if not multiselect_item.exists(timeout=0.2):
-                        ChatListSelectPos=(MousePos(selected[0]).right-120,ChatListSelectPos[1])
-                        mouse.right_click(coords=ChatListSelectPos)
+                    x,y=ChatListSelectPos#不是自己发的x默认在左边
+                    is_mybubble=Tools.is_my_bubble(selected[0].capture_as_image())#截图看看是不是自己发的消息
+                    if is_mybubble:#是自己发的去点右边
+                        x=MousePos(selected[0]).right-120
+                    if len(chatList.children())>1:
+                        y=MousePos(selected[0]).center_y
+                    mouse.right_click(coords=(x,y))
+                    while not multiselect_item.exists(timeout=0.1):
+                        y=y-15
+                        mouse.right_click(coords=(x,y))
                     multiselect_item.click_input()
                     mouse.click(coords=ChatListSelectPos)
                     break
@@ -953,19 +963,21 @@ class Navigator():
         chatinfo_pane,main_window=Navigator.open_chatinfo(friend=friend,is_maximize=is_maximize,search_pages=search_pages)
         friend_button=chatinfo_pane.child_window(title=friend,control_type='Button')
         old_version=version.parse(GlobalConfig.Version)<version.parse('4.1.9')#比4.1.9版本低
+        if Tools.is_group_chat(main_window):
+            chatinfo_button=main_window.child_window(**Buttons.ChatInfoButton)
+            chatinfo_button.click_input()
+            main_window.close()
+            raise NotFriendError(f'此为群聊,非好友,无法打开个人简介界面!')
         if friend_button.exists(timeout=3):
-            click_pos=MousePos(friend_button).FriendProfilePos
+            #好友头像按钮
+            headview_button=friend_button.children(control_type='Button')[0]
+            click_pos=MousePos(headview_button).FriendProfilePos
             mouse.click(coords=click_pos)
             if not old_version:
                 profile_pane=desktop.window(**Windows.PopUpProfileWindow)
             else:
                 profile_pane=main_window.window(**Windows.PopUpProfileWindow)
             return profile_pane,main_window
-        else:
-            chatinfo_button=main_window.child_window(**Buttons.ChatInfoButton)
-            chatinfo_button.click_input()
-            main_window.close()
-            raise NotFriendError(f'此为群聊,非好友,无法打开个人简介界面!')
         
     @staticmethod
     def open_friend_moments(friend:str,search_pages:int=None,is_maximize:bool=None,close_weixin:bool=None)->WindowSpecification:
@@ -985,9 +997,13 @@ class Navigator():
         moments_text=profile_pane.child_window(**Texts.MomentsText)
         moments_button=moments_text.parent().parent().descendants(control_type='Button')[0]
         moments_button.click_input()
-        moments_window=Tools.move_window_to_center(Window=Windows.MomentsWindow)
-        if close_weixin:
-            main_window.close()
+        moments_window=desktop.window(**Windows.MomentsWindow)
+        if moments_window.exists(timeout=3):
+            moments_window=Tools.move_window_to_center(Window=Windows.MomentsWindow)
+            if close_weixin:
+                main_window.close()
+        else:
+            moments_window=main_window
         return moments_window
 
     @staticmethod
@@ -1003,7 +1019,9 @@ class Navigator():
         if close_weixin is None:
             close_weixin=GlobalConfig.close_weixin
         main_window=Navigator.open_weixin(is_maximize=is_maximize)
-        main_window.child_window(**SideBar.Moments).click_input()
+        discovery_button=main_window.child_window(**SideBar.Discovery)
+        if discovery_button.exists(timeout=0.1):discovery_button.click_input()
+        main_window.child_window(**SideBar.Moments).double_click_input()
         moments_window=Tools.move_window_to_center(Independent_window.MomentsWindow)
         if close_weixin:
             main_window.close()
@@ -1025,8 +1043,11 @@ class Navigator():
         if close_weixin is None:
             close_weixin=GlobalConfig.close_weixin
         main_window=Navigator.open_weixin(is_maximize=is_maximize)
-        main_window.child_window(**SideBar.Channels).click_input()
+        discovery_button=main_window.child_window(**SideBar.Discovery)
+        if discovery_button.exists(timeout=0.1):discovery_button.click_input()
+        main_window.child_window(**SideBar.Channels).double_click_input()
         channels_window=Tools.move_window_to_center(Independent_window.ChannelsWindow)
+        Tools.cancel_pin(channels_window)
         if window_maximize:
             channels_window.maximize()
         if close_weixin:
@@ -1049,8 +1070,11 @@ class Navigator():
         if close_weixin is None:
             close_weixin=GlobalConfig.close_weixin
         main_window=Navigator.open_weixin(is_maximize=is_maximize)
-        main_window.child_window(**SideBar.Search).click_input()
+        discovery_button=main_window.child_window(**SideBar.Discovery)
+        if discovery_button.exists(timeout=0.1):discovery_button.click_input()
+        main_window.child_window(**SideBar.Search).double_click_input()
         search_window=Tools.move_window_to_center(Independent_window.SearchWindow)
+        Tools.cancel_pin(search_window)
         if window_maximize:
             search_window.maximize()
         if close_weixin:
@@ -1073,8 +1097,12 @@ class Navigator():
         if close_weixin is None:
             close_weixin=GlobalConfig.close_weixin
         main_window=Navigator.open_weixin(is_maximize=is_maximize)
-        main_window.child_window(**SideBar.MiniProgram).click_input()
+        discovery_button=main_window.child_window(**SideBar.Discovery)
+        if discovery_button.exists(timeout=0.1):discovery_button.click_input()
+        #4.1.12后UI名称变化:小程序面板->小程序
+        main_window.child_window(**SideBar.MiniProgram).double_click_input()
         program_window=Tools.move_window_to_center(Independent_window.MiniProgramWindow)
+        Tools.cancel_pin(program_window)
         if window_maximize:
             program_window.maximize()
         if close_weixin:
@@ -1347,7 +1375,7 @@ class Navigator():
             main_window.close()
             raise NoSuchFriendError
     @staticmethod
-    def open_chat_search_window(keyword:str,window_maximize:bool=None,is_maximize:bool=None,close_weixin:bool=None)->tuple[WindowSpecification,WindowSpecification]:
+    def open_chatSearch_window(keyword:str,window_maximize:bool=None,is_maximize:bool=None,close_weixin:bool=None)->tuple[WindowSpecification,WindowSpecification]:
         '''
         该方法用来在微信顶部搜索关键字然后打开聊天记录搜索窗口
         Args:
@@ -1412,16 +1440,25 @@ class Navigator():
         ChatHistoryWindow=Independent_window.ChatHistoryWindow
         main_window=Navigator.open_dialog_window(friend=friend,is_maximize=is_maximize,search_pages=search_pages)
         chat_history_button=main_window.child_window(**Buttons.ChatHistoryButton)
-        if not chat_history_button.exists(timeout=0.3):
+        if not chat_history_button.exists(timeout=0.2):
             main_window.close()
             raise NotFriendError(f'非正常好友或群聊！无法打开该好友或群聊的聊天记录界面')
         is_group_chat=Tools.is_group_chat(main_window)
         if not is_group_chat:
-            if GlobalConfig.language=='简体中文':title_re=rf'与“{friend}”'
+            if GlobalConfig.language=='简体中文':
+                #4.1.12标题里的“”换成了""
+                if version.parse(GlobalConfig.Version)>=version.parse('4.1.12'):
+                    title_re=rf'与"{friend}"' 
+                else: 
+                    title_re=rf'与“{friend}”'
             if GlobalConfig.language=='English':title_re=rf'Chat History with "{friend}"'
             if GlobalConfig.language=='繁體中文':title_re=rf'與「{friend}」'
         else:
-            if GlobalConfig.language=='简体中文':title_re=rf'“{friend}”的'
+            if GlobalConfig.language=='简体中文':
+                if version.parse(GlobalConfig.Version)>=version.parse('4.1.12'):
+                    title_re=rf'"{friend}"的'#4.1.12“”换成了""
+                else:
+                    title_re=rf'“{friend}”的'#4.1.12“”换成了""
             if GlobalConfig.language=='English':title_re=rf'Chat History for "{friend}"'
             if GlobalConfig.language=='繁體中文':title_re=rf'「{friend}」的'
         ChatHistoryWindow['title_re']=title_re
@@ -1551,31 +1588,22 @@ class Navigator():
             is_maximize=GlobalConfig.is_maximize
         if close_weixin is None:
             close_weixin=GlobalConfig.close_weixin
-        up=5
         program_window=Navigator.open_miniprogram_pane(is_maximize=is_maximize,close_weixin=close_weixin)
-        miniprogram_tab=program_window.child_window(title='小程序',control_type='TabItem',found_index=0)
-        miniprogram_tab.click_input()
-        more=program_window.child_window(title='更多',control_type='Text',found_index=0)
-        if not more.exists(timeout=load_delay,retry_interval=0.1):
-            program_window.close()
-            print('网络不良,请尝试增加load_delay时长,或更换网络!')
-        rec=more.rectangle()
-        mouse.click(coords=(rec.right+20,rec.top-50))
-        search=program_window.child_window(control_type='Edit',title='搜索小程序')
-        while not search.exists(timeout=0.1,retry_interval=0.1):
-            mouse.click(coords=(rec.right+20,rec.top-50-up))
-            search=program_window.child_window(control_type='Edit',title='搜索小程序')
-            up+=5
-        search.click_input()
-        SystemSettings.copy_text_to_clipboard(name)
-        pyautogui.hotkey('ctrl','v',_pause=False)
+        search_small=program_window.child_window(class_name='search_small')
+        search_small.click_input()
+        search_edit=program_window.child_window(control_type='Edit',title='搜索小程序')
+        search_edit.click_input()
+        search_edit.set_text(name)
         pyautogui.press("enter")
-        search_result=program_window.child_window(control_type="Document",class_name="Chrome_RenderWidgetHostHWND")
-        text=search_result.child_window(title=name,control_type='Text',found_index=0)
-        if text.exists(timeout=load_delay,retry_interval=0.1):
-            text.click_input()
-            program_window.close()
-            program=desktop.window(control_type='Pane',title=name)
+        program_window.close()#关掉小程序窗口
+        search_result_window=Tools.move_window_to_center(Independent_window.MiniProgramWindow)#搜索结果的窗口置于屏幕中间
+        Tools.cancel_pin(search_result_window)#取消置顶
+        container=search_result_window.child_window(control_type="Document",auto_id="RootWebArea")#搜索结果容器
+        search_result=container.child_window(title=name,control_type='Text')
+        if search_result.exists(timeout=load_delay,retry_interval=0.1):
+            search_result.click_input()
+            search_result_window.close()
+            program=desktop.window(control_type='Window',title=name)
             return program
         else:
             print('网络不良,请尝试增加load_delay时长,或更换网络!')
