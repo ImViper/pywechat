@@ -623,7 +623,7 @@ class SideBar_Control():
             self.Moments={'title':'Moments','control_type':'Button','found_index':0}#主界面左侧的朋友圈按钮
             self.Search={'title':'Search','control_type':'Button','found_index':0}#主界面左侧的搜一搜按钮
             self.Channels={'title':'Channels','control_type':'Button','found_index':0}#主界面左侧的视频号按钮
-            self.Discovery={'title':'Discovery','control_type':'Button'}#主界面左侧的发现按钮
+            self.Discovery={'title':'Discover','control_type':'Button'}#主界面左侧的发现按钮
             self.More={'title':'More','control_type':'Button','found_index':0}#主界面左侧的更多按钮 
             self.MiniProgram={'title':'Mini Programs Panel','control_type':'Button','found_index':0}#主界面左侧的小程序面板按钮
             if version.parse(self.Version)>=version.parse('4.1.12'):

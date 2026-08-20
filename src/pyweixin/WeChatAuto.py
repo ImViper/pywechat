@@ -1683,6 +1683,54 @@ class Contacts():
             recent_groups=list(zip(group_names,member_nums))#不使用dict(zip)是考虑到可能有相同群聊的,dict key不能有重复
             contacts_manage.close()
             return recent_groups
+
+    @staticmethod
+    def get_tags(is_maximize:bool=None,close_weixin:bool=None)->list[tuple[str]]:
+        '''
+        该方法用来获取所有标签(包括标签名称与该标签下的人数)
+        Args:
+
+            is_maximize:微信界面是否全屏，默认不全屏
+            close_weixin:任务结束后是否关闭微信，默认关闭
+        Returns:
+            tags:所有的标签
+        '''
+        def get_specific_info(texts):
+            nums=[int(num_pattern.search(text).group(1)) for text in texts]
+            names=[num_pattern.sub('',text) for text in texts]
+            return names,nums
+
+        if is_maximize is None:
+            is_maximize=GlobalConfig.is_maximize
+        if close_weixin is None:
+            close_weixin=GlobalConfig.close_weixin
+    
+        texts=[]
+        num_pattern=Regex_Patterns.GroupMember_Num_pattern
+        contacts_manage=Navigator.open_contacts_manage(is_maximize=is_maximize,close_weixin=close_weixin)
+        contacts_manage_list=contacts_manage.child_window(**Lists.ContactsManageList)
+        tag_item=contacts_manage.child_window(**ListItems.TagListItem)
+        Tools.collapse_contact_manage(contacts_manage)
+        if not tag_item.exists(timeout=0.3):
+            print(f'无标签,无法获取!')
+            contacts_manage.close()
+            return []
+        else:
+            tag_item.click_input()
+            contacts_manage_list.type_keys('{END}',pause=1)
+            last=contacts_manage_list.children(control_type='ListItem',class_name="mmui::ContactsManagerControlLabelCell")[-1].window_text()
+            contacts_manage_list.type_keys('{HOME}')
+            listitems=contacts_manage_list.children(control_type='ListItem',class_name="mmui::ContactsManagerControlLabelCell")
+            texts.extend([listitem.window_text() for listitem in listitems])
+            while texts[-1]!=last:
+                contacts_manage_list.type_keys('{PGDN}')
+                listitems=contacts_manage_list.children(control_type='ListItem',class_name="mmui::ContactsManagerControlLabelCell")
+                texts.extend([listitem.window_text() for listitem in listitems])
+            texts=list(dict.fromkeys(texts))#保留顺序去重,Texts内是群聊+(人数)构成的文本,如果群聊名称与人数都相同那就没法筛选了
+            tag_names,member_nums=get_specific_info(texts)#正则提取与替换便是群名与人数
+            tags=list(zip(tag_names,member_nums))[1:]#不使用dict(zip)是考虑到可能有相同群聊的,dict key不能有重复
+            contacts_manage.close()
+            return tags
     
     @staticmethod
     def check_new_friends(verify:bool=False,limit:int=8,clear:bool=False,is_maximize:bool=None,close_weixin:bool=None)->list[str]:
