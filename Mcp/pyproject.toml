@@ -13,7 +13,7 @@ dependencies=[
     "psutil>=5.9.5",
     "pyautogui>=0.9.54",
     "pycaw>=20240210",
-    "pywin32>=308"，
+    "pywin32>=308",
     "pywin32-ctypes>=0.2.2",
     "pywinauto>=0.6.8",
     "pillow>=10.4.0",
@@ -25,7 +25,7 @@ dependencies=[
 ]
 
 [project.scripts]
-pyweixin-rpa="mcp_server.server:main"
+pyweixin-rpa="pyweixin_rpa.mcp_server.server:main"
 
 [build-system]
 requires=["setuptools>=61.0"]
