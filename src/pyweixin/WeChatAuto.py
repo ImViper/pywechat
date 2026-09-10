@@ -159,7 +159,7 @@ class AutoReply():
                     if newMessage.class_name()=='mmui::ChatTextItemView':
                         texts.append(newMessage.window_text())
                         dialog_window.restore()
-                        is_my_bubble=Tools.is_my_bubble(newMessage.capture_as_image())
+                        is_my_bubble=Tools.is_my_bubble(newMessage)
                         if not is_my_bubble:
                             reply_content=callback(newMessage.window_text(),contexts)
                             if reply_content is not None:
@@ -258,7 +258,7 @@ class AutoReply():
                 if friend_type=='好友' and current_chat_name not in NeverReply:
                     latest_message=chatList.children(control_type='ListItem')[-1]#最新的消息
                     runtime_id=latest_message.element_info.runtime_id
-                    if runtime_id!=initial_runtime_id and not Tools.is_my_bubble(latest_message.capture_as_image()):#不等于刚打开页面时的那条消息且发送者是对方
+                    if runtime_id!=initial_runtime_id and not Tools.is_my_bubble(latest_message):#不等于刚打开页面时的那条消息且发送者是对方
                         input_edit.click_input()
                         reply_content=callback(current_chat_name,latest_message.window_text())
                         input_edit.set_text(reply_content)
@@ -267,7 +267,7 @@ class AutoReply():
                 if friend_type=='群聊' and current_chat_name not in NeverReply:
                     latest_message=chatList.children(control_type='ListItem')[-1]#最新的消息
                     runtime_id=latest_message.element_info.runtime_id
-                    if runtime_id!=initial_runtime_id and not Tools.is_my_bubble(latest_message.capture_as_image()):
+                    if runtime_id!=initial_runtime_id and not Tools.is_my_bubble(latest_message):
                         if not chatOnly:
                             input_edit.click_input()
                             reply_content=callback(current_chat_name,latest_message.window_text())

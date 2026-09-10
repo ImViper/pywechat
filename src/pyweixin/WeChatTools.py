@@ -400,37 +400,59 @@ class Tools():
         return scrollable
 
     @staticmethod
-    def is_my_bubble(img:Image.Image,right_width=55,threshold=100)->bool:
+    def is_my_bubble(bubble:ListItemWrapper, left_width=65, threshold=120) -> bool:
         '''
-        判断是否是自己发送的消息（右侧是否存在头像区域）
+        判断是否是自己发送的消息（通过检测左侧是否存在头像区域）
         Args:
-            img: pywinauto截图对象(capture_as_image)
-            right_width:右侧检测区域宽度,微信头像一般在最右60~80px
-            threshold:非背景像素的最小数量,默认100
+            bubble: 聊天界面消息列表内的最后一条消息(ListItem)
+            left_width:左侧检测区域宽度，微信头像一般在最左50~80px
+            threshold:非背景像素的最小数量
         Returns:
-            is_my_bubble:该条消息是否为自己发送
+            is_my_bubble: 该条消息是否为自己发送
         '''
         BG_DARK=(0x1E,0x1E,0x1F)#微信深色背景
         BG_LIGHT=(0xFA,0xFA,0xFA)#微信浅色背景
-        def color_dist(c1, c2):#欧式距离
-            return sum((a-b)**2 for a, b in zip(c1, c2))**0.5
+
+        def color_dist(c1,c2):
+            return sum((a-b) ** 2 for a, b in zip(c1, c2)) ** 0.5
+        
+        rec=bubble.rectangle()
+        img=bubble.capture_as_image()
         w,h=img.size
-        #取最右侧区域
-        x_start=max(w-right_width,0)
-        region=img.crop((x_start,0,w,h))
-        pixels=list(region.getdata())
-        non_bg_count=0
-        for r, g, b in pixels:
-            d1=color_dist((r, g, b), BG_DARK)
-            d2=color_dist((r, g, b), BG_LIGHT)
-            # 既不像深色背景，也不像浅色背景 → 认为是内容
-            if d1>threshold and d2>threshold:
-                non_bg_count+=1
-                # 提前结束，提高性能
-                if non_bg_count>=threshold*2:
-                    return True
-        my_bubble=non_bg_count>=threshold
-        return my_bubble
+        if rec.top<0:
+            #特别长的文本消息的top才小于0，只有一部分在聊天区域，此时使用背景像素有没有绿色来判断而不是直接去看左侧有没有头像(有没有)
+            bottom_height=min(120,h)
+            third_w=w//3
+            #右侧区域（自己气泡应该在的位置）
+            right_part=img.crop((2 * third_w, h - bottom_height, w, h))
+            green_count = 0
+            for r, g, b in right_part.getdata():
+                # 微信绿色气泡特征
+                if g > 140 and g > r + 30 and g > b + 30:
+                    green_count += 1
+                    if green_count >= threshold:
+                        return True
+            return False
+
+        else:#正常消息都在可见区域内
+            #取最左侧区域（头像区域）
+            x_end=min(left_width, w)
+            region=img.crop((0, 0, x_end, h))
+            pixels=list(region.getdata())
+            non_bg_count=0
+            for r, g, b in pixels:
+                d1=color_dist((r, g, b), BG_DARK)
+                d2=color_dist((r, g, b), BG_LIGHT)
+                #既不像深色背景，也不像浅色背景 → 认为是内容（头像）
+                if d1>threshold and d2>threshold:
+                    non_bg_count+=1
+                    #提前结束，提高性能
+                    if non_bg_count>=threshold*2:
+                        break
+            #左侧有头像→对方发的（返回False）
+            #左侧无头像→自己发的（返回True）
+            has_avatar_on_left=non_bg_count>=threshold
+            return not has_avatar_on_left
         
     @staticmethod
     def is_group_chat(main_window:WindowSpecification)->bool:
@@ -620,25 +642,25 @@ class Tools():
         if not chatList.exists(timeout=0.2):
             print(f'非正常好友,无法选中消息!')
             return 
+        SystemInfo={'mmui::ChatItemView','mmui::ChatSystemInfoItemView'}
+        multiselect_item=main_window.child_window(**MenuItems.SelectMenuItem)
         activate_position=(chatList.rectangle().right-12,chatList.rectangle().mid_point().y)
         mouse.click(coords=activate_position)
         chatList.type_keys('{END}')
-        multiselect_item=main_window.child_window(**MenuItems.SelectMenuItem)
         while True:
             selected=[listitem for listitem in chatList.children(control_type='ListItem') if listitem.has_keyboard_focus()]
             if selected:
-                if selected[0].class_name()!='mmui::ChatItemView':
+                if selected[0].class_name() not in SystemInfo:
                     ChatListSelectPos=MousePos(selected[0]).ChatListSelectPos
                     x,y=ChatListSelectPos#不是自己发的x默认在左边
-                    is_mybubble=Tools.is_my_bubble(selected[0].capture_as_image())#截图看看是不是自己发的消息
+                    is_mybubble=Tools.is_my_bubble(selected[0])#截图看看是不是自己发的消息
                     if is_mybubble:#是自己发的去点右边
                         x=MousePos(selected[0]).right-120
-                    if len(chatList.children())>1:
+                    if MousePos(selected[0]).top>0:
                         y=MousePos(selected[0]).center_y
+                    else:
+                        y=MousePos(chatList).top+100
                     mouse.right_click(coords=(x,y))
-                    while not multiselect_item.exists(timeout=0.1):
-                        y=y-15
-                        mouse.right_click(coords=(x,y))
                     multiselect_item.click_input()
                     mouse.click(coords=ChatListSelectPos)
                     break

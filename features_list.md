@@ -6,11 +6,10 @@
 
 ## Changed
 
-> - src\pyweixin\WeChatTools.py\class Navigator\open_friend_profile\修复无法正确点击到好友头像按钮打开profile界面
+> - src\pyweixin\WeChatTools.py\class Tools\is_my_bubble\修改发送人判断逻辑改为左侧头像像素判断，并增加对于超长消息的判断逻辑，准确率更高
 > - src\pyweixin\WeChatTools.py\class Tools\select_chatList\适配不同主界面内不同长度、类型消息选中后开启多选遍历
-> - src\pyweixin\WeChatTools.py\class Navigator\open_moments\UI变更,打开朋友圈逻辑
-> - src\pyweixin\WeChatTools.py\class Navigator\open_channels\UI变更,打开视频号逻辑
-> - src\pyweixin\WeChatTools.py\class Navigator\open_miniprogram_pane\UI变更,打开小程序面板逻辑
+> - src\pyweixin\utils.py\traverse_messages\对系统消息(时间,拉人进群等统一为SystemInfo内)筛选
+> - src\pyweixin\WeChatAuto.py\Messages\pull_messages\上述三个改动均为保证方法的稳定
 
 ## ToDo
 
